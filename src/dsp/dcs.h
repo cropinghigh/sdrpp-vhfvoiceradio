@@ -16,8 +16,8 @@ namespace dsp {
 
     //Input sample rate = 672 S/s
     //Based on http://yo3iiu.ro/blog/?p=779, author: Bogdan Diaconescu <yo3iiu@yo3iiu.ro>
-    class DCSDecoder : public Processor<float, float> {
-        using base_type = Processor<float, float>;
+    class DCSDecoder : public  Sink<float> {
+        using base_type =  Sink<float>;
     public:
         DCSDecoder() {}
 
@@ -35,7 +35,7 @@ namespace dsp {
             squelchCode = newSquelchCode;
         }
 
-        inline int process(int count, const float* in, float* out) {
+        inline int process(int count, const float* in) {
             if (count < 0) { return -1; }
             int8_t signs[count];
             volk_32f_binary_slicer_8i(signs, in, count);
@@ -89,7 +89,7 @@ namespace dsp {
             int count = base_type::_in->read();
             if (count < 0) { return -1; }
 
-            process(count, base_type::_in->readBuf, base_type::out.writeBuf);
+            process(count, base_type::_in->readBuf);
             //no output
             base_type::_in->flush();
             return 0;

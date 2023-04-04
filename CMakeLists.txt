@@ -4,7 +4,7 @@ project(vhfvoiceradio)
 set(CMAKE_INSTALL_PREFIX "/usr/")
 SET(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${PROJECT_SOURCE_DIR}/cmake/")
 
-file(GLOB_RECURSE SRC "src/*.cpp" "src/*.h")
+file(GLOB_RECURSE SRC "src/*.cpp" "src/*.h" "src/*.hpp" "src/*.c")
 
 find_package(MBE REQUIRED)
 find_package(ITPP REQUIRED)

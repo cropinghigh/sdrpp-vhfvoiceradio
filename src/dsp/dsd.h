@@ -1,7 +1,7 @@
 #pragma once
 #include <dsp/processor.h>
 #include <utils/flog.h>
-extern "C"{
+extern "C" {
     #include <mbelib.h>
 }
 #include "common.h"
@@ -31,6 +31,381 @@ extern "C"{
  */
 
 namespace dsp {
+
+    class NewDSD : public Processor<uint8_t, short> {
+        using base_type = Processor<uint8_t, short>;
+    public:
+        NewDSD() {}
+
+        NewDSD(stream<uint8_t>* in) { init(in); }
+
+        void init(stream<uint8_t>* in) {
+            p25_frame_nac2[12] = 0;
+            p25_ldu1_lsd1[8] = 0;
+            p25_ldu1_lsd2[8] = 0;
+            p25_ldu2_lsd1[8] = 0;
+            p25_ldu2_lsd2[8] = 0;
+            mbe_initMbeParms(&curMp, &prevMp, &prevMpEnhanced);
+            base_type::init(in);
+        }
+
+        int process(int count, const uint8_t* in, short* out);
+
+        int run() {
+            int count = base_type::_in->read();
+            if (count < 0) { return -1; }
+
+            int outCount = process(count, base_type::_in->readBuf, base_type::out.writeBuf);
+            // Swap if some data was generated
+            base_type::_in->flush();
+            if (outCount) {
+                if (!base_type::out.swap(outCount)) { return -1; }
+            }
+            return outCount;
+        }
+
+        struct Frame_status {
+            bool sync = false;
+            enum Lasttype {
+                LAST_NOTHING,
+                LAST_DMR,
+                LAST_P25,
+            } lasttype = LAST_NOTHING;
+        };
+        struct MBE_status {
+            bool mbe_status_decoding = false;
+            std::string mbe_status_errorbar = "";
+        };
+        struct DMR_status {
+            uint8_t dmr_status_s0_lastburstt = 0;
+            uint8_t dmr_status_s1_lastburstt = 0;
+            std::string dmr_status_s0_lasttype = "";
+            std::string dmr_status_s1_lasttype = "";
+        };
+        struct P25_status {
+            int p25_status_src = 0;
+            bool p25_status_emr = false;
+            int p25_status_tg = 0;
+            int p25_status_othertg1 = 0;
+            int p25_status_othertg2 = 0;
+            int p25_status_othertg3 = 0;
+            int p25_status_nac = 0;
+            uint64_t p25_status_mi_0 = 0;
+            uint16_t p25_status_mi_1 = 0;
+            uint8_t p25_status_algid = 0;
+            uint16_t p25_status_kid = 0;
+            uint8_t p25_status_mfid = 0;
+            uint16_t p25_status_tgid = 0;
+            uint8_t p25_status_lcformat = 0;
+            uint64_t p25_status_lcinfo = 0;
+            uint8_t p25_status_lastduid[2];
+            std::string p25_status_lasttype = "UNK";
+            bool p25_status_irr_err = false;
+        };
+
+        Frame_status getFrameSyncStatus() {
+            return frame_status;
+        }
+        MBE_status getMBEStatus() {
+            return mbe_status;
+        }
+        DMR_status getDMRStatus() {
+            return dmr_status;
+        }
+        P25_status getP25Status() {
+            return p25_status;
+        }
+
+    private:
+
+        int inSymsCtr = 0;
+        int outSymsCtr = 0;
+
+        enum state {
+            STATE_NOT_ENOUGH_DATA,
+            STATE_NO_SYNC,
+            STATE_SYNC,
+            STATE_FSFND_P25,
+            STATE_FSFND_DMR_DATA,
+            STATE_FSFND_DMR_VOICE,
+            STATE_PROC_FRAME_DMR_DATA,
+            STATE_PROC_FRAME_DMR_DATA_1,
+            STATE_PROC_FRAME_DMR_VOICE,
+            STATE_PROC_FRAME_DMR_VOICE_1,
+            STATE_PROC_FRAME_DMR_VOICE_2,
+            STATE_PROC_FRAME_DMR_VOICE_3,
+            STATE_PROC_FRAME_DMR_VOICE_4,
+            STATE_PROC_FRAME_DMR_VOICE_5,
+            STATE_PROC_FRAME_DMR_VOICE_6,
+            STATE_PROC_FRAME_DMR_VOICE_7,
+            STATE_PROC_FRAME_DMR_VOICE_8,
+            STATE_PROC_FRAME_DMR_VOICE_9,
+            STATE_PROC_FRAME_DMR_VOICE_10,
+            STATE_PROC_FRAME_P25,
+            STATE_PROC_FRAME_P25_1,
+            STATE_PROC_FRAME_P25_2,
+            STATE_PROC_FRAME_P25_3,
+            STATE_PROC_FRAME_P25_HEXWORD,
+            STATE_PROC_FRAME_P25_HEXWORD_G24_1,
+            STATE_PROC_FRAME_P25_HEXWORD_HAMM_1,
+            STATE_PROC_FRAME_P25_DODECAWORD,
+            STATE_PROC_FRAME_P25_DODECAWORD_1,
+            STATE_PROC_FRAME_P25_IMBE,
+            STATE_PROC_FRAME_P25_HDU,
+            STATE_PROC_FRAME_P25_HDU_1,
+            STATE_PROC_FRAME_P25_HDU_2,
+            STATE_PROC_FRAME_P25_LDU1,
+            STATE_PROC_FRAME_P25_LDU1_1,
+            STATE_PROC_FRAME_P25_LDU1_2,
+            STATE_PROC_FRAME_P25_LDU1_3,
+            STATE_PROC_FRAME_P25_LDU1_4,
+            STATE_PROC_FRAME_P25_LDU1_5,
+            STATE_PROC_FRAME_P25_LDU1_6,
+            STATE_PROC_FRAME_P25_LDU1_7,
+            STATE_PROC_FRAME_P25_LDU1_8,
+            STATE_PROC_FRAME_P25_LDU2,
+            STATE_PROC_FRAME_P25_LDU2_1,
+            STATE_PROC_FRAME_P25_LDU2_2,
+            STATE_PROC_FRAME_P25_LDU2_3,
+            STATE_PROC_FRAME_P25_LDU2_4,
+            STATE_PROC_FRAME_P25_LDU2_5,
+            STATE_PROC_FRAME_P25_LDU2_6,
+            STATE_PROC_FRAME_P25_LDU2_7,
+            STATE_PROC_FRAME_P25_LDU2_8,
+            STATE_PROC_FRAME_P25_TDULC,
+            STATE_PROC_FRAME_P25_TDULC_1,
+            STATE_PROC_FRAME_P25_TDULC_2,
+            STATE_PROC_FRAME_P25_TDU,
+            STATE_PROC_FRAME_P25_TSDU,
+            STATE_PROC_FRAME_P25_PDU,
+        };
+        state curr_state = STATE_NOT_ENOUGH_DATA;
+
+        int skipCtr = 0;
+        uint8_t dibitBuf[1000000];
+
+        //Frame sync search
+
+        Frame_status frame_status;
+
+        int framesyncSymbolsRead = 0;
+        int fss_dibitBufP = 200;
+        char framesynctest_buf[1024];
+        int framesynctest_p = 25;
+        int framesynctest_offset = 0;
+        #define INV_P25P1_SYNC "333331331133111131311111"
+        #define P25P1_SYNC     "111113113311333313133333"
+        #define DMR_BS_DATA_SYNC  "313333111331131131331131"
+        #define DMR_BS_VOICE_SYNC "131111333113313313113313"
+        #define DMR_MS_DATA_SYNC  "311131133313133331131113"
+        #define DMR_MS_VOICE_SYNC "133313311131311113313331"
+        int findFrameSync(int count, const uint8_t* in);
+
+        //MBE
+        MBE_status mbe_status;
+        mbe_parms curMp;
+        mbe_parms prevMp;
+        mbe_parms prevMpEnhanced;
+        char mbe_errStr[64];
+        #define MBE_uvquality 3
+        void processMbeFrame(char imbe_fr[8][23], char ambe_fr[4][24], char imbe7100_fr[7][24], short* out, int* outcnt);
+
+        //DMR
+        DMR_status dmr_status;
+
+        int dmr_dibitBuffP = 0;
+        int processDMRdata(int count, const uint8_t* in);
+        int dmrv_iter = 0;
+        int dmrv_ctr = 0;
+        char dmrv_ambe_fr[4][24];
+        char dmrv_ambe_fr2[4][24];
+        char dmrv_ambe_fr3[4][24];
+        const static int dmrv_const_rW[36];
+        const static int dmrv_const_rX[36];
+        const static int dmrv_const_rY[36];
+        const static int dmrv_const_rZ[36];
+        int dmrv_w_ctr = 0;
+        int dmrv_x_ctr = 0;
+        int dmrv_y_ctr = 0;
+        int dmrv_z_ctr = 0;
+        char dmrv_sync[25];
+        char dmrv_syncdata[25];
+        bool dmrv_muteslot = false;
+        int dmr_lastslot = 0;
+        int processDMRvoice(int count, const uint8_t* in, short* out, int* outcnt);
+
+        //P25p1
+        P25_status p25_status;
+        int p25_frame_nac = 0;
+        char p25_frame_nac2[13];
+        char p25_frame_bch_code[63];
+        int p25_bch_code_idx = 0;
+        int p25_frame_ctr = 0;
+        uint8_t p25_frame_duid[2];
+        int p25_frame_prev_type = 0;
+        unsigned char p25_frame_parity;
+        int processP25frame(int count, const uint8_t* in);
+        // Ideas taken from http://op25.osmocom.org/trac/wiki.png/browser/op25/gr-op25/lib/decoder_ff_impl.cc
+        // See also p25_training_guide.pdf page 48.
+        // See also tia-102-baaa-a-project_25-fdma-common_air_interface.pdf page 40.
+        // BCH encoder/decoder implementation from IT++. GNU GPL 3 license.
+        itpp::BCH p25_bch {itpp::BCH(63, 16, 11, "6 3 3 1 1 4 1 3 6 7 2 3 5 4 5 3", true)};
+        /**
+        * Convenience class to calculate the parity of the DUID values. Keeps a table with the expected outcomes
+        * for fast lookup.
+        */
+        class P25_ParityTable {
+            public:
+                P25_ParityTable() {
+                    for (unsigned int i=0; i < sizeof(table); i++) {
+                        table[i] = 0;
+                    }
+                    table[get_index(1,1)] = 1;
+                    table[get_index(2,2)] = 1;
+                }
+
+                unsigned char get_value(unsigned char x, unsigned char y) {
+                    return table[get_index(x,y)];
+                }
+            private:
+                unsigned char table[16];
+
+                unsigned char get_index(unsigned char x, unsigned char y) {
+                    return (x<<2) + y;
+                }
+        } p25_parity_table;
+        int p25_check_nid();
+        DSDGolay24 p25_golay24;
+        DSDReedSolomon_36_20_17 p25_reed_solomon_36_20_17;
+        DSDReedSolomon_24_12_13 p25_reed_solomon_24_12_13;
+        DSDReedSolomon_24_16_9 p25_reed_solomon_24_16_9;
+        Hamming_10_6_3_TableImpl p25_hamming;
+        state p25_hexword_return;
+        int p25_hexword_statuscnt = 0;
+        int p25_hexword_ctr = 0;
+        char p25_hexword[6];
+        char p25_hexword_parity[12];
+        bool p25_hexword_golay24 = true; //false=Hamming
+        int processP25HexWord(int count, const uint8_t* in);
+        state p25_dodecaword_return;
+        int p25_dodecaword_statuscnt = 0;
+        int p25_dodecaword_ctr = 0;
+        char p25_dodecaword[12];
+        char p25_dodecaword_parity[12];
+        int processP25DodecaWord(int count, const uint8_t* in);
+        /**
+        * Uses the information from a corrected sequence of hex word.
+        * The proper Golay 24 parity is calculated from the corrected hex word so we can also fix the Golay parity
+        * that we read originally from the signal.
+        * \param corrected_hex_data Pointer to a sequence of hex words that has been error corrected and therefore
+        * we trust it's correct. Typically this are hex words that has been decoded successfully using a
+        * Reed-Solomon variant.
+        * \param hex_count The number of hex words in the sequence.
+        */
+        void P25correctGolayDibits6(char* corrected_hex_data, int hex_count);
+        /**
+        * Correct the information in analog_signal_array according with the content of data, which has been
+        * error corrected and should be valid.
+        * \param data A sequence of 12-bit words.
+        * \param count Number of words in the sequence.
+        */
+        void P25correctGolayDibits12(char* data, int count);
+        void P25correctHammingDibits(char* data, int count);
+        /**
+        * Reverse the order of bits in a 12-bit word. We need this to accommodate to the expected bit order in
+        * some algorithms.
+        * \param dodeca The 12-bit word to reverse.
+        */
+        void P25swapHexWordsBits(char* dodeca) {
+          int j;
+          for(j=0; j<6; j++) {
+              int swap;
+              swap = dodeca[j];
+              dodeca[j] = dodeca[j+6];
+              dodeca[j+6] = swap;
+            }
+        }
+        /**
+        * Reverse the order of bits in a sequence of six pairs of 12-bit words and their parities.
+        * \param dodeca_data Pointer to the start of the 12-bit words sequence.
+        * \param dodeca_parity Pointer to the parities sequence.
+        */
+        void P25swapHexWords(char* dodeca_data, char* dodeca_parity) {
+          int i;
+          for(i=0; i<6; i++) {
+              P25swapHexWordsBits(dodeca_data + i*12);
+              P25swapHexWordsBits(dodeca_parity + i*12);
+          }
+        }
+        void P25updatelcwstatus();
+        state p25_imbe_return;
+        int p25_imbe_ctr = 0;
+        int p25_imbe_statuscnt = 0;
+        char p25_imbe_fr[8][23];
+        /*
+        * P25 Phase1 IMBE interleave schedule
+        */
+        const static int p25_const_iW[72];
+        const static int p25_const_iX[72];
+        const static int p25_const_iY[72];
+        const static int p25_const_iZ[72];
+        int p25_w_ctr = 0;
+        int p25_x_ctr = 0;
+        int p25_y_ctr = 0;
+        int p25_z_ctr = 0;
+        int processP25IMBEFrame(int count, const uint8_t* in, short* out, int* outcnt);
+        char p25_hdu_hex_data[20][6];    // Data in hex-words (6 bit words). A total of 20 hex words.
+        char p25_hdu_hex_parity[16][6]; // Parity of the data, again in hex-word format. A total of 16 parity hex words.
+        int p25_hdu_ctr = 0;
+        int processP25HDU(int count, const uint8_t* in);
+        int p25_ldu1_ctr = 0;
+        char p25_ldu1_hex_data[12][6];    // Data in hex-words (6 bit words). A total of 12 hex words.
+        char p25_ldu1_hex_parity[12][6];  // Parity of the data, again in hex-word format. A total of 12 parity hex words.
+        char p25_ldu1_lsd[8];
+        char p25_ldu1_lsd_cyclic_parity[8];
+        char p25_ldu1_lsd1[9];
+        char p25_ldu1_lsd2[9];
+        int processP25LDU1(int count, const uint8_t* in);
+        int p25_ldu2_ctr = 0;
+        char p25_ldu2_hex_data[16][6];    // Data in hex-words (6 bit words). A total of 16 hex words.
+        char p25_ldu2_hex_parity[8][6];   // Parity of the data, again in hex-word format. A total of 12 parity hex words.
+        char p25_ldu2_lsd[8];
+        char p25_ldu2_lsd_cyclic_parity[8];
+        char p25_ldu2_lsd1[9];
+        char p25_ldu2_lsd2[9];
+        int processP25LDU2(int count, const uint8_t* in);
+        int p25_tdulc_ctr = 0;
+        int p25_tdulc_statuscnt = 0;
+        char p25_tdulc_dodeca_data[6][12];    // Data in 12-bit words. A total of 6 words.
+        char p25_tdulc_dodeca_parity[6][12];  // Reed-Solomon parity of the data. A total of 6 parity 12-bit words.
+        int processP25TDULC(int count, const uint8_t* in);
+        int p25_tdu_ctr = 0;
+        int p25_tdu_statuscnt = 0;
+        int processP25TDU(int count, const uint8_t* in);
+        int p25_tsdu_ctr = 0;
+        int processP25TSDU(int count, const uint8_t* in);
+        int processP25PDU(int count, const uint8_t* in);
+    };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     #define DSD_INPUT_BUFF_SIZE 240
 

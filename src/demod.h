@@ -51,3 +51,4 @@ namespace demod {
 
 #include "demodulators/dsd.h"
 #include "demodulators/nfm.h"
+#include "demodulators/olddsd.h"

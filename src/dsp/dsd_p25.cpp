@@ -1,6 +1,1454 @@
 #include "dsd.h"
 
 namespace dsp { 
+
+    int NewDSD::processP25frame(int count, const uint8_t* in) {
+        int usedDibits = 0;
+        int dibit;
+        if(curr_state == STATE_PROC_FRAME_P25) {
+            // Read the NAC, 12 bits
+            for(int i = 0; i < count; i++) {
+                dibit = in[i];
+                usedDibits++;
+                char v = 1 & (dibit >> 1); // bit 1
+                p25_frame_nac2[p25_frame_ctr*2] = v + '0';
+                p25_frame_bch_code[p25_bch_code_idx] = v;
+                p25_bch_code_idx++;
+
+                v = 1 & dibit;        // bit 0
+                p25_frame_nac2[p25_frame_ctr*2+1] = v + '0';
+                p25_frame_bch_code[p25_bch_code_idx] = v;
+                p25_bch_code_idx++;
+                p25_frame_ctr++;
+                if(p25_frame_ctr == 6) {
+                    p25_frame_ctr = 0;
+                    p25_frame_nac = strtol (p25_frame_nac2, NULL, 2);
+                    p25_frame_duid[0] = 0;
+                    p25_frame_duid[1] = 0;
+                    curr_state = STATE_PROC_FRAME_P25_1;
+                    break;
+                }
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_1) {
+            // Read the DUID, 4 bits
+            for(int i = 0; i < count; i++) {
+                dibit = in[i];
+                usedDibits++;
+                p25_frame_duid[p25_frame_ctr] = dibit;
+                p25_frame_bch_code[p25_bch_code_idx] = 1 & (dibit >> 1);  // bit 1
+                p25_bch_code_idx++;
+                p25_frame_bch_code[p25_bch_code_idx] = 1 & dibit;         // bit 0
+                p25_bch_code_idx++;
+                p25_frame_ctr++;
+                if(p25_frame_ctr == 2) {
+                    p25_frame_ctr = 0;
+                    curr_state = STATE_PROC_FRAME_P25_2;
+                    break;
+                }
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_2) {
+            for(int i = 0; i < count; i++) {
+                dibit = in[i];
+                usedDibits++;
+                if(p25_frame_ctr < 3) {
+                    // Read the BCH data for error correction of NAC and DUID
+                    p25_frame_bch_code[p25_bch_code_idx] = 1 & (dibit >> 1);  // bit 1
+                    p25_bch_code_idx++;
+                    p25_frame_bch_code[p25_bch_code_idx] = 1 & dibit;         // bit 0
+                    p25_bch_code_idx++;
+                } else {
+                    // Intermission: read the status dibit
+                }
+                p25_frame_ctr++;
+                if(p25_frame_ctr == 4) {
+                    p25_frame_ctr = 0;
+                    curr_state = STATE_PROC_FRAME_P25_3;
+                    break;
+                }
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_3) {
+            for(int i = 0; i < count; i++) {
+                dibit = in[i];
+                usedDibits++;
+                if(p25_frame_ctr < 20) {
+                    // ... continue reading the BCH error correction data
+                    p25_frame_bch_code[p25_bch_code_idx] = 1 & (dibit >> 1);  // bit 1
+                    p25_bch_code_idx++;
+                    p25_frame_bch_code[p25_bch_code_idx] = 1 & dibit;         // bit 0
+                    p25_bch_code_idx++;
+                } else {
+                    // Read the parity bit
+                    p25_frame_bch_code[p25_bch_code_idx] = 1 & (dibit >> 1);      // bit 1
+                    p25_frame_parity = (1 & dibit);     // bit 0
+                }
+                if(p25_bch_code_idx > 62) {
+                    flog::error("P25 OVERFLOW CODE IDX %d\n", p25_bch_code_idx);
+                    curr_state = STATE_SYNC;
+                    p25_bch_code_idx = 0;
+                    break;
+                }
+                p25_frame_ctr++;
+                if(p25_frame_ctr == 21) {
+                    curr_state = STATE_SYNC;
+                    p25_frame_ctr = 0;
+                    // Check if the NID is correct
+
+                    int check_result = p25_check_nid();
+                    if (check_result) {
+                        // Maybe NAC fixed by error correction
+                        // Maybe DUID fixed by error correction
+                    } else {
+                        // Check of NID failed and unable to recover its value
+                        p25_frame_duid[0] = 0xff;
+                        p25_frame_duid[1] = 0xff;
+                    }
+                    p25_status.p25_status_nac = p25_frame_nac;
+                    p25_status.p25_status_lastduid[0] = p25_frame_duid[0];
+                    p25_status.p25_status_lastduid[1] = p25_frame_duid[1];
+                    if (p25_frame_duid[0] == 0 && p25_frame_duid[1] == 0) {
+                        // Header Data Unit
+                        p25_status.p25_status_lasttype = "HDU";
+                        p25_hdu_ctr = 0;
+                        p25_frame_prev_type = 2;
+                        curr_state = STATE_PROC_FRAME_P25_HDU;
+                    } else if (p25_frame_duid[0] == 1 && p25_frame_duid[1] == 1) {
+                        // Logical Link Data Unit 1
+                        p25_status.p25_status_lasttype = "LDU1";
+                        p25_ldu1_ctr = 0;
+                        p25_hexword_ctr = 0;
+                        p25_imbe_ctr = 0;
+                        p25_frame_prev_type = 1;
+                        curr_state = STATE_PROC_FRAME_P25_LDU1;
+                    } else if (p25_frame_duid[0] == 2 && p25_frame_duid[1] == 2) {
+                        // Logical Link Data Unit 2
+                        p25_status.p25_status_lasttype = "LDU2";
+                        p25_ldu2_ctr = 0;
+                        p25_hexword_ctr = 0;
+                        p25_imbe_ctr = 0;
+                        if (p25_frame_prev_type != 1) {
+                            p25_frame_prev_type = 0;
+                            curr_state = STATE_SYNC;
+                        } else {
+                            p25_frame_prev_type = 2;
+                            curr_state = STATE_PROC_FRAME_P25_LDU2;
+                        }
+                    } else if (p25_frame_duid[0] == 3 && p25_frame_duid[1] == 3) {
+                        // Terminator with subsequent Link Control
+                        p25_status.p25_status_lasttype = "TDULC";
+                        p25_frame_prev_type = 0;
+                        curr_state = STATE_PROC_FRAME_P25_TDULC;
+                    } else if (p25_frame_duid[0] == 0 && p25_frame_duid[1] == 3) {
+                        // Terminator without subsequent Link Control
+                        p25_status.p25_status_lasttype = "TDU";
+                        p25_status.p25_status_emr = false;
+                        p25_status.p25_status_irr_err = false;
+                        p25_frame_prev_type = 0;
+                        curr_state = STATE_PROC_FRAME_P25_TDU;
+                    } else if (p25_frame_duid[0] == 1 && p25_frame_duid[1] == 3) {
+                        // TSDU
+                        p25_status.p25_status_lasttype = "TSDU";
+                        p25_status.p25_status_emr = false;
+                        p25_status.p25_status_irr_err = false;
+                        p25_frame_prev_type = 3;
+                        curr_state = STATE_PROC_FRAME_P25_TSDU;
+                    } else if (p25_frame_duid[0] == 3 && p25_frame_duid[1] == 0) {
+                        // PDU
+                        p25_status.p25_status_lasttype = "PDU";
+                        p25_status.p25_status_emr = false;
+                        p25_status.p25_status_irr_err = false;
+                        p25_frame_prev_type = 4;
+                        curr_state = STATE_PROC_FRAME_P25_PDU;
+                    } else {
+                        // Unknown
+                        p25_status.p25_status_lasttype = "UNK";
+                        p25_status.p25_status_emr = false;
+                        p25_status.p25_status_irr_err = false;
+                        p25_frame_prev_type = 0;
+                        curr_state = STATE_SYNC;
+                    }
+                    break;
+                }
+            }
+        }
+        return usedDibits;
+    }
+
+    int NewDSD::p25_check_nid() {
+        int result;
+
+        // Fill up with the given input
+        itpp::bvec input(63);
+        for(int i=0; i<63; i++) {
+            input[i] = p25_frame_bch_code[i];
+        }
+
+        // Decode it
+        itpp::bvec decoded, cw_isvalid;
+        bool ok = p25_bch.decode(input, decoded, cw_isvalid);
+
+        if (!ok) {
+            // Decode failed
+            result = 0;
+        } else {
+            // Take the NAC from the decoded output. It's a 12 bit number starting from position 0.
+            // Just convert the output from a binary sequence to an integer.
+            int nac = 0;
+            for (int i=0; i<12; i++) {
+                nac <<= 1;
+                nac |= (int)decoded[i];
+            }
+            p25_frame_nac = nac;
+
+            // Take the fixed DUID from the encoded output. 4 bit value starting at position 12.
+            unsigned char new_duid_0 = (((int)decoded[12])<<1) + ((int)decoded[13]);
+            unsigned char new_duid_1 = (((int)decoded[14])<<1) + ((int)decoded[15]);
+            p25_frame_duid[0] = new_duid_0;
+            p25_frame_duid[1] = new_duid_1;
+
+            // Check the parity
+            unsigned char expected_parity = p25_parity_table.get_value(new_duid_0, new_duid_1);
+
+            if (expected_parity != p25_frame_parity) {
+                // Ignore, not sure what to do
+                //printf("Error in parity detected?");
+            }
+
+            result = 1;
+        }
+
+        return result;
+    }
+
+    int NewDSD::processP25HexWord(int count, const uint8_t* in) {
+        int usedDibits = 0;
+        int dibit;
+        if(curr_state == STATE_PROC_FRAME_P25_HEXWORD) {
+            for(int i = 0; i < count; i++) {
+                dibit = in[i];
+                usedDibits++;
+                if(p25_hexword_statuscnt == 35) {
+                    // TODO: do something useful with the status bits...
+                    p25_hexword_statuscnt = 0;
+                } else {
+                    p25_hexword_statuscnt++;
+                    p25_hexword[p25_hexword_ctr*2]   = (1 & (dibit >> 1));      // bit 1
+                    p25_hexword[p25_hexword_ctr*2+1] = (1 & dibit);             // bit 0
+                    p25_hexword_ctr++;
+                    if(p25_hexword_ctr == 6/2) {
+                        p25_hexword_ctr = 0;
+                        if(p25_hexword_golay24) {
+                            /**
+                            * Reads an hex word, its parity bits and attempts to error correct it using the Golay24 algorithm.
+                            */
+                            curr_state = STATE_PROC_FRAME_P25_HEXWORD_G24_1;
+                        } else {
+                            /**
+                            * Read an hex word, its parity bits and attempts to error correct it using the Hamming algorithm.
+                            */
+                            curr_state = STATE_PROC_FRAME_P25_HEXWORD_HAMM_1;
+                        }
+                        break;
+                    }
+                }
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_HEXWORD_G24_1) {
+            for(int i = 0; i < count; i++) {
+                dibit = in[i];
+                usedDibits++;
+                if(p25_hexword_statuscnt == 35) {
+                    // TODO: do something useful with the status bits...
+                    p25_hexword_statuscnt = 0;
+                } else {
+                    p25_hexword_statuscnt++;
+                    p25_hexword_parity[p25_hexword_ctr*2] = (1 & (dibit >> 1));      // bit 1
+                    p25_hexword_parity[p25_hexword_ctr*2+1] = (1 & dibit);             // bit 0
+                    p25_hexword_ctr++;
+                    if(p25_hexword_ctr == 12/2) {
+                        p25_hexword_ctr = 0;
+                        /**
+                        * Corrects a hex (6 bit) word  using the Golay 24 FEC.
+                        */
+                        int fixed_errors;
+                        p25_golay24.decode_6(p25_hexword, p25_hexword_parity, &fixed_errors);
+                        curr_state = p25_hexword_return;
+                        break;
+                    }
+                }
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_HEXWORD_HAMM_1) {
+            for(int i = 0; i < count; i++) {
+                dibit = in[i];
+                usedDibits++;
+                if(p25_hexword_statuscnt == 35) {
+                    // TODO: do something useful with the status bits...
+                    p25_hexword_statuscnt = 0;
+                } else {
+                    p25_hexword_statuscnt++;
+                    p25_hexword_parity[p25_hexword_ctr*2] = (1 & (dibit >> 1));      // bit 1
+                    p25_hexword_parity[p25_hexword_ctr*2+1] = (1 & dibit);             // bit 0
+                    p25_hexword_ctr++;
+                    if(p25_hexword_ctr == 4/2) {
+                        p25_hexword_ctr = 0;
+                        // Use Hamming to error correct the hex word
+                        int hamm = p25_hamming.decode(p25_hexword, p25_hexword_parity);
+                        curr_state = p25_hexword_return;
+                        break;
+                    }
+                }
+            }
+        }
+        return usedDibits;
+    }
+
+    int NewDSD::processP25DodecaWord(int count, const uint8_t* in) {
+        int usedDibits = 0;
+        int dibit;
+        if(curr_state == STATE_PROC_FRAME_P25_DODECAWORD) {
+            for(int i = 0; i < count; i++) {
+                dibit = in[i];
+                usedDibits++;
+                if(p25_dodecaword_statuscnt == 35) {
+                    // TODO: do something useful with the status bits...
+                    p25_dodecaword_statuscnt = 0;
+                } else {
+                    p25_dodecaword_statuscnt++;
+                    p25_dodecaword[p25_dodecaword_ctr*2] = (1 & (dibit >> 1));      // bit 1
+                    p25_dodecaword[p25_dodecaword_ctr*2+1] = (1 & dibit);             // bit 0
+                    p25_dodecaword_ctr++;
+                    if(p25_dodecaword_ctr == 12/2) {
+                        p25_dodecaword_ctr = 0;
+                        /**
+                        * Reads an dodeca word, its parity bits and attempts to error correct it using the Golay24 algorithm.
+                        */
+                        curr_state = STATE_PROC_FRAME_P25_DODECAWORD_1;
+                        break;
+                    }
+                }
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_DODECAWORD_1) {
+            for(int i = 0; i < count; i++) {
+                dibit = in[i];
+                usedDibits++;
+                if(p25_dodecaword_statuscnt == 35) {
+                    // TODO: do something useful with the status bits...
+                    p25_dodecaword_statuscnt = 0;
+                } else {
+                    p25_dodecaword_statuscnt++;
+                    p25_dodecaword_parity[p25_dodecaword_ctr*2] = (1 & (dibit >> 1));      // bit 1
+                    p25_dodecaword_parity[p25_dodecaword_ctr*2+1] = (1 & dibit);             // bit 0
+                    p25_dodecaword_ctr++;
+                    if(p25_dodecaword_ctr == 12/2) {
+                        p25_dodecaword_ctr = 0;
+                        // Use extended golay to error correct the dodeca word
+                        int fixed_errors;
+                        p25_golay24.decode_12(p25_dodecaword, p25_dodecaword_parity, &fixed_errors);
+                        curr_state = p25_dodecaword_return;
+                        break;
+                    }
+                }
+            }
+        }
+        return usedDibits;
+    }
+
+    void NewDSD::P25correctGolayDibits6(char* corrected_hex_data, int hex_count) {
+        char parity[12];
+        int dibit;
+        for (int i=hex_count-1; i>=0; i--) {
+            // Calculate the Golay 24 parity for the corrected hex word
+            p25_golay24.encode_6(corrected_hex_data+i*6, parity);
+        }
+    }
+
+    void NewDSD::P25correctGolayDibits12(char* data, int count) {
+      int i, j;
+      int dibit;
+      char parity[12];
+
+      for (i=count-1; i>=0; i--) {
+          // Calculate the golay parity for the hex word
+          p25_golay24.encode_12(data+i*12, parity);
+      }
+    }
+
+    void NewDSD::P25correctHammingDibits(char* data, int count) {
+        char parity[4];
+        int i, j;
+
+        for (i=count-1; i>=0; i--) {
+            // The next two dibits are calculated has the hamming parity of the hex word
+            p25_hamming.encode(data+i*6, parity);
+        }
+    }
+
+    void NewDSD::P25updatelcwstatus() {
+        if(p25_status.p25_status_lcformat == 0b00000100) {
+            // first tg is the active channel
+            p25_status.p25_status_tg = 0;
+            for (int i = 40; i < 52; i++) {
+                p25_status.p25_status_tg |= ((p25_status.p25_status_lcinfo & (1UL << i)) >> i) << (51 - i);
+            }
+            // the remaining 3 appear to be other active tg's on the system
+            p25_status.p25_status_othertg1 = 0;
+            p25_status.p25_status_othertg2 = 0;
+            p25_status.p25_status_othertg3 = 0;
+            for (int i = 28; i < 40; i++) {
+                p25_status.p25_status_othertg1 |= ((p25_status.p25_status_lcinfo & (1UL << i)) >> i) << (39 - i);
+            }
+            for (int i = 16; i < 28; i++) {
+                p25_status.p25_status_othertg2 |= ((p25_status.p25_status_lcinfo & (1UL << i)) >> i) << (27 - i);
+            }
+            for (int i = 4; i < 16; i++) {
+                p25_status.p25_status_othertg3 |= ((p25_status.p25_status_lcinfo & (1UL << i)) >> i) << (15 - i);
+            }
+        } else if(p25_status.p25_status_lcformat == 0b00000000) {
+            p25_status.p25_status_tg = 0;
+            p25_status.p25_status_src = 0;
+            if(p25_status.p25_status_mfid == 0b10010000) {
+                for (int i = 20; i < 32; i++) {
+                    p25_status.p25_status_tg |= (((p25_status.p25_status_lcinfo & (1UL << i)) >> i) << (31 - i));
+                }
+            } else {
+                for (int i = 16; i < 32; i++) {
+                    p25_status.p25_status_tg |= (((p25_status.p25_status_lcinfo & (1UL << i)) >> i) << (31 - i));
+                }
+            }
+            for (int i = 32; i < 56; i++) {
+                p25_status.p25_status_src |= (((p25_status.p25_status_lcinfo & (1UL << i)) >> i) << (55 - i));
+            }
+            p25_status.p25_status_emr = p25_status.p25_status_lcinfo & 1UL;
+        }
+    }
+
+    const int NewDSD::p25_const_iW[] = {
+        0, 2, 4, 1, 3, 5,
+        0, 2, 4, 1, 3, 6,
+        0, 2, 4, 1, 3, 6,
+        0, 2, 4, 1, 3, 6,
+        0, 2, 4, 1, 3, 6,
+        0, 2, 4, 1, 3, 6,
+        0, 2, 5, 1, 3, 6,
+        0, 2, 5, 1, 3, 6,
+        0, 2, 5, 1, 3, 7,
+        0, 2, 5, 1, 3, 7,
+        0, 2, 5, 1, 4, 7,
+        0, 3, 5, 2, 4, 7
+    };
+
+    const int NewDSD::p25_const_iX[] = {
+        22, 20, 10, 20, 18, 0,
+        20, 18, 8, 18, 16, 13,
+        18, 16, 6, 16, 14, 11,
+        16, 14, 4, 14, 12, 9,
+        14, 12, 2, 12, 10, 7,
+        12, 10, 0, 10, 8, 5,
+        10, 8, 13, 8, 6, 3,
+        8, 6, 11, 6, 4, 1,
+        6, 4, 9, 4, 2, 6,
+        4, 2, 7, 2, 0, 4,
+        2, 0, 5, 0, 13, 2,
+        0, 21, 3, 21, 11, 0
+    };
+
+    const int NewDSD::p25_const_iY[] = {
+        1, 3, 5, 0, 2, 4,
+        1, 3, 6, 0, 2, 4,
+        1, 3, 6, 0, 2, 4,
+        1, 3, 6, 0, 2, 4,
+        1, 3, 6, 0, 2, 4,
+        1, 3, 6, 0, 2, 5,
+        1, 3, 6, 0, 2, 5,
+        1, 3, 6, 0, 2, 5,
+        1, 3, 6, 0, 2, 5,
+        1, 3, 7, 0, 2, 5,
+        1, 4, 7, 0, 3, 5,
+        2, 4, 7, 1, 3, 5
+    };
+
+    const int NewDSD::p25_const_iZ[] = {
+        21, 19, 1, 21, 19, 9,
+        19, 17, 14, 19, 17, 7,
+        17, 15, 12, 17, 15, 5,
+        15, 13, 10, 15, 13, 3,
+        13, 11, 8, 13, 11, 1,
+        11, 9, 6, 11, 9, 14,
+        9, 7, 4, 9, 7, 12,
+        7, 5, 2, 7, 5, 10,
+        5, 3, 0, 5, 3, 8,
+        3, 1, 5, 3, 1, 6,
+        1, 14, 3, 1, 22, 4,
+        22, 12, 1, 22, 20, 2
+    };
+
+    int NewDSD::processP25IMBEFrame(int count, const uint8_t* in, short* out, int* outcnt) {
+        int usedDibits = 0;
+        int dibit;
+        if(curr_state == STATE_PROC_FRAME_P25_IMBE) {
+            for(int i = 0; i < count; i++) {
+                dibit = in[i];
+                usedDibits++;
+                if(p25_imbe_statuscnt == 35) {
+                    // TODO: do something useful with the status bits...
+                    p25_imbe_statuscnt = 0;
+                } else {
+                    p25_imbe_statuscnt++;
+                    p25_imbe_fr[p25_const_iW[p25_w_ctr]][p25_const_iX[p25_x_ctr]] = (1 & (dibit >> 1)); // bit 1
+                    p25_imbe_fr[p25_const_iY[p25_y_ctr]][p25_const_iZ[p25_z_ctr]] = (1 & dibit);        // bit 0
+
+                    p25_w_ctr++;
+                    p25_x_ctr++;
+                    p25_y_ctr++;
+                    p25_z_ctr++;
+                    p25_imbe_ctr++;
+                    if(p25_imbe_ctr == 72) {
+                        p25_imbe_ctr = 0;
+                        p25_w_ctr = 0;
+                        p25_x_ctr = 0;
+                        p25_y_ctr = 0;
+                        p25_z_ctr = 0;
+                        // Check for a non-standard c0 transmitted
+                        // This is explained here: https://github.com/szechyjs/dsd/issues/24
+                        char non_standard_word[23] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0};
+                        int match = 1;
+                        unsigned int i;
+                        for (i=0; i<23; i++) {
+                            if (p25_imbe_fr[0][i] != non_standard_word[i]) {
+                                match = 0;
+                                break;
+                            }
+                        }
+                        if (match) {
+//                             Skip this particular value. If we let it pass it will be signaled as an erroneus IMBE
+//                            printf("(Non-standard IMBE c0 detected, skipped)");
+                        } else {
+                            processMbeFrame (p25_imbe_fr, NULL, NULL, out, outcnt);
+                        }
+                        curr_state = p25_imbe_return;
+                        break;
+                    }
+                }
+            }
+        }
+        return usedDibits;
+    }
+
+    int NewDSD::processP25HDU(int count, const uint8_t* in) {
+        int usedDibits = 0;
+        int dibit;
+        if(curr_state == STATE_PROC_FRAME_P25_HDU) {
+            // Read 20 hex words, correct them using their Golay 24 parity data.
+            if(p25_hdu_ctr == 0) {
+                // we skip the status dibits that occur every 36 symbols
+                // the next status symbol comes in 14 dibits from here
+                // so we start counter at 36-14-1 = 21
+                p25_hexword_statuscnt = 21;
+                p25_hexword_return = STATE_PROC_FRAME_P25_HDU;
+                p25_hexword_golay24 = true;
+                p25_hexword_ctr = 0;
+            } else {
+                // Store the corrected hex word into the hex_data store:
+                for (int j=0; j<6; j++) {
+                    p25_hdu_hex_data[(20 - p25_hdu_ctr)][j] = p25_hexword[j];
+                }
+            }
+            p25_hdu_ctr++;
+            if(p25_hdu_ctr == 21) {
+                p25_hdu_ctr = 0;
+                curr_state = STATE_PROC_FRAME_P25_HDU_1;
+            } else {
+                curr_state = STATE_PROC_FRAME_P25_HEXWORD;
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_HDU_1) {
+            // Read the 16 parity hex word. These are used to FEC the 20 hex words using Reed-Solomon.
+            if(p25_hdu_ctr == 0) {
+                // we skip the status dibits that occur every 36 symbols
+                // the next status symbol comes in 14 dibits from here
+                // so we start counter at 36-14-1 = 21
+                p25_hexword_return = STATE_PROC_FRAME_P25_HDU_1;
+                p25_hexword_golay24 = true;
+                p25_hexword_ctr = 0;
+            } else {
+                // Store the corrected hex word into the hex_parity store:
+                for (int j=0; j<6; j++) {
+                    p25_hdu_hex_parity[(16 - p25_hdu_ctr)][j] = p25_hexword[j];
+                }
+            }
+            p25_hdu_ctr++;
+            if(p25_hdu_ctr == 17) {
+                p25_hdu_ctr = 0;
+                curr_state = STATE_PROC_FRAME_P25_HDU_2;
+            } else {
+                curr_state = STATE_PROC_FRAME_P25_HEXWORD;
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_HDU_2) {
+            for(int i = 0; i < count; i++) {
+                dibit = in[i];
+                usedDibits++;
+                p25_hdu_ctr++;
+                if(p25_hdu_ctr == 6) {
+                    p25_hdu_ctr = 0;
+                    //TODO: Do something useful with the status bits...
+                    // Use the Reed-Solomon algorithm to correct the data. hex_data is modified in place
+                    int irrecoverable_errors = p25_reed_solomon_36_20_17.decode((char*)p25_hdu_hex_data, (char*)p25_hdu_hex_parity);
+                    if (irrecoverable_errors != 0) {
+                        p25_status.p25_status_irr_err = true;
+                        // The hex words failed the Reed-Solomon check. There were too many errors.
+                    } else {
+                        // The hex words passed the Reed-Solomon check.
+                        p25_status.p25_status_irr_err = false;
+                        char fixed_parity[16*6];
+
+                        // Correct the dibits that we did read according with the newly corrected hex_data values
+                        P25correctGolayDibits6((char*)p25_hdu_hex_data, 20);
+
+                        // Generate again the Reed-Solomon parity for the corrected data
+                        p25_reed_solomon_36_20_17.encode((char*)p25_hdu_hex_data, fixed_parity);
+
+                        // Correct the dibits that we read according with the corrected parity values
+                        P25correctGolayDibits6(fixed_parity, 16);
+                    }
+                    // Now put the corrected data on the DSD structures
+
+                    p25_status.p25_status_mi_0 = 0;
+                    p25_status.p25_status_mi_1 = 0;
+                    p25_status.p25_status_mfid = 0;
+                    p25_status.p25_status_algid = 0;
+                    p25_status.p25_status_kid = 0;
+                    p25_status.p25_status_tgid = 0;
+                    for(int i = 19; i >= 0; i--) {
+                        for(int k = 0; k < 6; k++) {
+                            if(i >= 8) {
+                                //mi
+                                if(i > 9) {
+                                    p25_status.p25_status_mi_0 |= ((uint64_t)p25_hdu_hex_data[i][k]) << ((19-i)*6 + k);
+                                } else if(i == 9) {
+                                    if(k <= 3) {
+                                        p25_status.p25_status_mi_0 |= ((uint64_t)p25_hdu_hex_data[i][k]) << ((19-i)*6 + k);
+                                    } else {
+                                        p25_status.p25_status_mi_1 |= ((uint64_t)p25_hdu_hex_data[i][k]) << ((19-i)*6 + k - 4);
+                                    }
+                                } else {
+                                    p25_status.p25_status_mi_1 |= ((uint64_t)p25_hdu_hex_data[i][k]) << ((19-i)*6 + k - 4);
+                                }
+                            } else if(i >= 7) {
+                                //mfid
+                                p25_status.p25_status_mfid |= ((uint64_t)p25_hdu_hex_data[i][k]) << (7 - ((7-i)*6 + k));
+                            } else if(i == 6) {
+                                if(k <= 1) {
+                                    //mfid
+                                    p25_status.p25_status_mfid |= ((uint64_t)p25_hdu_hex_data[i][k]) << (7 - ((7-i)*6 + k));
+                                } else {
+                                    //algid
+                                    // The important algorithm ID. This indicates whether the data is
+                                    // encrypted and if so what is the encryption algorithm used.
+                                    // A code 0x80 here means that the data is unencrypted.
+                                    p25_status.p25_status_algid |= ((uint64_t)p25_hdu_hex_data[i][k]) << (7 - ((6-i)*6 + k - 2));
+                                }
+                            } else if(i == 5) {
+                                if(k <= 3) {
+                                    //algid
+                                    p25_status.p25_status_algid |= ((uint64_t)p25_hdu_hex_data[i][k]) << (7 - ((6-i)*6 + k - 2));
+                                } else {
+                                    //keyid
+                                    p25_status.p25_status_kid |= ((uint64_t)p25_hdu_hex_data[i][k]) << (15 - ((5-i)*6 + k - 4));
+                                }
+                            } else if(i >= 3) {
+                                //keyid
+                                p25_status.p25_status_kid |= ((uint64_t)p25_hdu_hex_data[i][k]) << (15 - ((5-i)*6 + k - 4));
+                            } else if(i == 2) {
+                                if(k <= 1) {
+                                    //keyid
+                                    p25_status.p25_status_kid |= ((uint64_t)p25_hdu_hex_data[i][k]) << (15 - ((5-i)*6 + k - 4));
+                                } else {
+                                    //tgid
+                                    p25_status.p25_status_tgid |= ((uint64_t)p25_hdu_hex_data[i][k]) << (15 - ((2-i)*6 + k - 2));
+                                }
+                            } else {
+                                //tgid
+                                p25_status.p25_status_tgid |= ((uint64_t)p25_hdu_hex_data[i][k]) << (15 - ((2-i)*6 + k - 2));
+                            }
+                        }
+                    }
+                    p25_status.p25_status_tg = 0;
+                    if(p25_status.p25_status_mfid == 0b10010000) {
+                        for (int i = 4; i < 16; i++) {
+                            p25_status.p25_status_tg |= ((p25_status.p25_status_tgid & (1UL << i)) >> i) << (15 - i);
+                        }
+                    } else {
+                        for (int i = 0; i < 16; i++) {
+                            p25_status.p25_status_tg |= ((p25_status.p25_status_tgid & (1UL << i)) >> i) << (15 - i);
+                        }
+                    }
+                    curr_state = STATE_SYNC;
+                    break;
+                }
+            }
+        }
+        return usedDibits;
+    }
+
+    int NewDSD::processP25LDU1(int count, const uint8_t* in) {
+        int usedDibits = 0;
+        int dibit;
+        if(curr_state == STATE_PROC_FRAME_P25_LDU1) {
+            //IMBE 1&2
+            if(p25_ldu1_ctr == 0) {
+                mbe_status.mbe_status_decoding = true;
+                mbe_status.mbe_status_errorbar = "";
+                // we skip the status dibits that occur every 36 symbols
+                // the first IMBE frame starts 14 symbols before next status
+                // so we start counter at 36-14-1 = 21
+                p25_imbe_statuscnt = 21;
+                p25_imbe_return = STATE_PROC_FRAME_P25_LDU1;
+            }
+            p25_ldu1_ctr++;
+            if(p25_ldu1_ctr == 2+1) {
+                p25_ldu1_ctr = 0;
+                curr_state = STATE_PROC_FRAME_P25_LDU1_1;
+            } else {
+                curr_state = STATE_PROC_FRAME_P25_IMBE;
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_LDU1_1) {
+            // Read data after IMBE 2
+            if(p25_ldu1_ctr == 0) {
+                p25_hexword_statuscnt = p25_imbe_statuscnt; //move current status cnt from imbe to hexword receiver
+                p25_hexword_return = STATE_PROC_FRAME_P25_LDU1_1;
+                p25_hexword_golay24 = false; //Using Hamming
+                p25_hexword_ctr = 0;
+            } else {
+                //Copy previous received hexword to the buffer
+                for(int i = 0; i < 6; i++) {
+                    p25_ldu1_hex_data[12 - p25_ldu1_ctr][i] = p25_hexword[i];
+                }
+            }
+            p25_ldu1_ctr++;
+            if(p25_ldu1_ctr == 4+1) {
+                p25_ldu1_ctr = 0;
+                //Process 3rd IMBE frame and return to the next state
+                p25_imbe_statuscnt = p25_hexword_statuscnt;
+                p25_imbe_return = STATE_PROC_FRAME_P25_LDU1_2;
+                curr_state = STATE_PROC_FRAME_P25_IMBE;
+            } else {
+                curr_state = STATE_PROC_FRAME_P25_HEXWORD;
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_LDU1_2) {
+            // Read data after IMBE 3
+            if(p25_ldu1_ctr == 0) {
+                p25_hexword_statuscnt = p25_imbe_statuscnt; //move current status cnt from imbe to hexword receiver
+                p25_hexword_return = STATE_PROC_FRAME_P25_LDU1_2;
+                p25_hexword_ctr = 0;
+            } else {
+                //Copy previous received hexword to the buffer
+                for(int i = 0; i < 6; i++) {
+                    p25_ldu1_hex_data[8 - p25_ldu1_ctr][i] = p25_hexword[i];
+                }
+            }
+            p25_ldu1_ctr++;
+            if(p25_ldu1_ctr == 4+1) {
+                p25_ldu1_ctr = 0;
+                //Process IMBE frame and return to the next state
+                p25_imbe_statuscnt = p25_hexword_statuscnt;
+                p25_imbe_return = STATE_PROC_FRAME_P25_LDU1_3;
+                curr_state = STATE_PROC_FRAME_P25_IMBE;
+            } else {
+                curr_state = STATE_PROC_FRAME_P25_HEXWORD;
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_LDU1_3) {
+            // Read data after IMBE 4
+            if(p25_ldu1_ctr == 0) {
+                p25_hexword_statuscnt = p25_imbe_statuscnt; //move current status cnt from imbe to hexword receiver
+                p25_hexword_return = STATE_PROC_FRAME_P25_LDU1_3;
+                p25_hexword_ctr = 0;
+            } else {
+                //Copy previous received hexword to the buffer
+                for(int i = 0; i < 6; i++) {
+                    p25_ldu1_hex_data[4 - p25_ldu1_ctr][i] = p25_hexword[i];
+                }
+            }
+            p25_ldu1_ctr++;
+            if(p25_ldu1_ctr == 4+1) {
+                p25_ldu1_ctr = 0;
+                //Process IMBE frame and return to the next state
+                p25_imbe_statuscnt = p25_hexword_statuscnt;
+                p25_imbe_return = STATE_PROC_FRAME_P25_LDU1_4;
+                curr_state = STATE_PROC_FRAME_P25_IMBE;
+            } else {
+                curr_state = STATE_PROC_FRAME_P25_HEXWORD;
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_LDU1_4) {
+            // Read data after IMBE 5
+            if(p25_ldu1_ctr == 0) {
+                p25_hexword_statuscnt = p25_imbe_statuscnt; //move current status cnt from imbe to hexword receiver
+                p25_hexword_return = STATE_PROC_FRAME_P25_LDU1_4;
+                p25_hexword_ctr = 0;
+            } else {
+                //Copy previous received hexword to the buffer
+                for(int i = 0; i < 6; i++) {
+                    p25_ldu1_hex_parity[12 - p25_ldu1_ctr][i] = p25_hexword[i];
+                }
+            }
+            p25_ldu1_ctr++;
+            if(p25_ldu1_ctr == 4+1) {
+                p25_ldu1_ctr = 0;
+                //Process IMBE frame and return to the next state
+                p25_imbe_statuscnt = p25_hexword_statuscnt;
+                p25_imbe_return = STATE_PROC_FRAME_P25_LDU1_5;
+                curr_state = STATE_PROC_FRAME_P25_IMBE;
+            } else {
+                curr_state = STATE_PROC_FRAME_P25_HEXWORD;
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_LDU1_5) {
+            // Read data after IMBE 6
+            if(p25_ldu1_ctr == 0) {
+                p25_hexword_statuscnt = p25_imbe_statuscnt; //move current status cnt from imbe to hexword receiver
+                p25_hexword_return = STATE_PROC_FRAME_P25_LDU1_5;
+                p25_hexword_ctr = 0;
+            } else {
+                //Copy previous received hexword to the buffer
+                for(int i = 0; i < 6; i++) {
+                    p25_ldu1_hex_parity[8 - p25_ldu1_ctr][i] = p25_hexword[i];
+                }
+            }
+            p25_ldu1_ctr++;
+            if(p25_ldu1_ctr == 4+1) {
+                p25_ldu1_ctr = 0;
+                //Process IMBE frame and return to the next state
+                p25_imbe_statuscnt = p25_hexword_statuscnt;
+                p25_imbe_return = STATE_PROC_FRAME_P25_LDU1_6;
+                curr_state = STATE_PROC_FRAME_P25_IMBE;
+            } else {
+                curr_state = STATE_PROC_FRAME_P25_HEXWORD;
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_LDU1_6) {
+            // Read data after IMBE 7
+            if(p25_ldu1_ctr == 0) {
+                p25_hexword_statuscnt = p25_imbe_statuscnt; //move current status cnt from imbe to hexword receiver
+                p25_hexword_return = STATE_PROC_FRAME_P25_LDU1_6;
+                p25_hexword_ctr = 0;
+            } else {
+                //Copy previous received hexword to the buffer
+                for(int i = 0; i < 6; i++) {
+                    p25_ldu1_hex_parity[4 - p25_ldu1_ctr][i] = p25_hexword[i];
+                }
+            }
+            p25_ldu1_ctr++;
+            if(p25_ldu1_ctr == 4+1) {
+                p25_ldu1_ctr = 0;
+                //Process IMBE frame 8 and return to the next state
+                p25_imbe_statuscnt = p25_hexword_statuscnt;
+                p25_imbe_return = STATE_PROC_FRAME_P25_LDU1_7;
+                curr_state = STATE_PROC_FRAME_P25_IMBE;
+            } else {
+                curr_state = STATE_PROC_FRAME_P25_HEXWORD;
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_LDU1_7) {
+            // Read data after IMBE 8: LSD (low speed data)
+            for(int i = 0; i < count; i++) {
+                dibit = in[i];
+                usedDibits++;
+                if(p25_imbe_statuscnt == 35) { //Using IMBE status counter, since it was the last one
+                    // TODO: do something useful with the status bits...
+                    p25_imbe_statuscnt = 0;
+                } else {
+                    p25_imbe_statuscnt++;
+                    if(p25_ldu1_ctr <= 6) {
+                        p25_ldu1_lsd[p25_ldu1_ctr+0] = (1 & (dibit >> 1));      // bit 1
+                        p25_ldu1_lsd[p25_ldu1_ctr+1] = (1 & dibit);             // bit 0
+                        p25_ldu1_ctr+=2;
+                    } else if(p25_ldu1_ctr <= 6+6) {
+                        p25_ldu1_lsd_cyclic_parity[p25_ldu1_ctr-6+0] = (1 & (dibit >> 1));      // bit 1
+                        p25_ldu1_lsd_cyclic_parity[p25_ldu1_ctr-6+1] = (1 & dibit);             // bit 0
+                        p25_ldu1_ctr+=2;
+                    } else if(p25_ldu1_ctr == 6+6+2) {
+                        for (int k=0; k<8; k++) {
+                            p25_ldu1_lsd1[k] = p25_ldu1_lsd[k] + '0';
+                        }
+                        p25_ldu1_lsd[p25_ldu1_ctr-(6+6)+0] = (1 & (dibit >> 1));      // bit 1
+                        p25_ldu1_lsd[p25_ldu1_ctr-(6+6)+1] = (1 & dibit);             // bit 0
+                        p25_ldu1_ctr+=2;
+                    } else if(p25_ldu1_ctr <= 6+6+6) {
+                        p25_ldu1_lsd[p25_ldu1_ctr-(6+6)+0] = (1 & (dibit >> 1));      // bit 1
+                        p25_ldu1_lsd[p25_ldu1_ctr-(6+6)+1] = (1 & dibit);             // bit 0
+                        p25_ldu1_ctr+=2;
+                    } else if(p25_ldu1_ctr <= 6+6+6+6) {
+                        p25_ldu1_lsd_cyclic_parity[p25_ldu1_ctr-(6+6+6)+0] = (1 & (dibit >> 1));      // bit 1
+                        p25_ldu1_lsd_cyclic_parity[p25_ldu1_ctr-(6+6+6)+1] = (1 & dibit);             // bit 0
+                        p25_ldu1_ctr+=2;
+                    } else {
+                      for (int k=0; k<8; k++) {
+                          p25_ldu1_lsd2[k] = p25_ldu1_lsd[k] + '0';
+                      }
+                      // TODO: error correction of the LSD bytes...
+                      // TODO: do something useful with the LSD bytes...
+                      p25_ldu1_ctr = 0;
+                      //Process IMBE frame 9 and return to the next state
+                      p25_imbe_return = STATE_PROC_FRAME_P25_LDU1_8;
+                      curr_state = STATE_PROC_FRAME_P25_IMBE;
+                      break;
+                    }
+                }
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_LDU1_8) {
+            // trailing status symbol
+            {
+                int status;
+                dibit = in[0];
+                usedDibits++;
+                status = dibit + '0';
+                // TODO: do something useful with the status bits...
+            }
+
+            // Error correct the hex_data using Reed-Solomon hex_parity
+            int irrecoverable_errors = p25_reed_solomon_24_12_13.decode((char*)p25_ldu1_hex_data, (char*)p25_ldu1_hex_parity);
+            if (irrecoverable_errors == 1) {
+                // We can correct (13-1)/2 = 6 errors. If we failed, it means that there were more than 6 errors in
+                // these 12+12 words.
+                p25_status.p25_status_irr_err = true;
+            } else {
+                // Same comments as in processHDU. See there.
+                p25_status.p25_status_irr_err = false;
+
+                char fixed_parity[12*6];
+
+                // Correct the dibits that we read according with hex_data values
+                P25correctHammingDibits((char*)p25_ldu1_hex_data, 12);
+
+                // Generate again the Reed-Solomon parity
+                p25_reed_solomon_24_12_13.encode((char*)p25_ldu1_hex_data, fixed_parity);
+
+                // Correct the dibits that we read according with the fixed parity values
+                P25correctHammingDibits(fixed_parity, 12);
+            }
+            // Now put the corrected data into the DSD structures
+            p25_status.p25_status_mfid = 0;
+            p25_status.p25_status_lcformat = 0;
+            p25_status.p25_status_lcinfo = 0;
+            for(int i = 11; i >= 0; i--) {
+                for(int k = 0; k < 6; k++) {
+                    if(i == 11) {
+                        //lcformat
+                        p25_status.p25_status_lcformat |= ((uint64_t)p25_ldu1_hex_data[i][k]) << ((11-i)*6 + k);
+                    } else if(i == 10) {
+                        if(k <= 1) {
+                            //lcformat
+                            p25_status.p25_status_lcformat |= ((uint64_t)p25_ldu1_hex_data[i][k]) << ((11-i)*6 + k);
+                        } else {
+                            //mfid
+                            p25_status.p25_status_mfid |= ((uint64_t)p25_ldu1_hex_data[i][k]) << ((10-i)*6 + k - 2);
+                        }
+                    } else if(i == 9) {
+                        if(k <= 3) {
+                            //mfid
+                            p25_status.p25_status_mfid |= ((uint64_t)p25_ldu1_hex_data[i][k]) << ((10-i)*6 + k - 2);
+                        } else {
+                            //lcinfo
+                            p25_status.p25_status_lcinfo |= ((uint64_t)p25_ldu1_hex_data[i][k]) << ((9-i)*6 + k - 4);
+                        }
+                    } else {
+                        //lcinfo
+                        p25_status.p25_status_lcinfo |= ((uint64_t)p25_ldu1_hex_data[i][k]) << ((9-i)*6 + k - 4);
+                    }
+                }
+            }
+            P25updatelcwstatus();
+            mbe_status.mbe_status_decoding = false;
+            curr_state = STATE_SYNC;
+        }
+        return usedDibits;
+    }
+
+    int NewDSD::processP25LDU2(int count, const uint8_t* in) {
+        int usedDibits = 0;
+        int dibit;
+        if(curr_state == STATE_PROC_FRAME_P25_LDU2) {
+            //IMBE 1&2
+            if(p25_ldu2_ctr == 0) {
+                mbe_status.mbe_status_decoding = true;
+                mbe_status.mbe_status_errorbar = "";
+                // we skip the status dibits that occur every 36 symbols
+                // the first IMBE frame starts 14 symbols before next status
+                // so we start counter at 36-14-1 = 21
+                p25_imbe_statuscnt = 21;
+                p25_imbe_return = STATE_PROC_FRAME_P25_LDU2;
+            }
+            p25_ldu2_ctr++;
+            if(p25_ldu2_ctr == 2+1) {
+                p25_ldu2_ctr = 0;
+                curr_state = STATE_PROC_FRAME_P25_LDU2_1;
+            } else {
+                curr_state = STATE_PROC_FRAME_P25_IMBE;
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_LDU2_1) {
+            // Read data after IMBE 2
+            if(p25_ldu2_ctr == 0) {
+                p25_hexword_statuscnt = p25_imbe_statuscnt; //move current status cnt from imbe to hexword receiver
+                p25_hexword_return = STATE_PROC_FRAME_P25_LDU2_1;
+                p25_hexword_golay24 = false; //Using Hamming
+                p25_hexword_ctr = 0;
+            } else {
+                //Copy previous received hexword to the buffer
+                for(int i = 0; i < 6; i++) {
+                    p25_ldu2_hex_data[16 - p25_ldu2_ctr][i] = p25_hexword[i];
+                }
+            }
+            p25_ldu2_ctr++;
+            if(p25_ldu2_ctr == 4+1) {
+                p25_ldu2_ctr = 0;
+                //Process 3rd IMBE frame and return to the next state
+                p25_imbe_statuscnt = p25_hexword_statuscnt;
+                p25_imbe_return = STATE_PROC_FRAME_P25_LDU2_2;
+                curr_state = STATE_PROC_FRAME_P25_IMBE;
+            } else {
+                curr_state = STATE_PROC_FRAME_P25_HEXWORD;
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_LDU2_2) {
+            // Read data after IMBE 3
+            if(p25_ldu2_ctr == 0) {
+                p25_hexword_statuscnt = p25_imbe_statuscnt; //move current status cnt from imbe to hexword receiver
+                p25_hexword_return = STATE_PROC_FRAME_P25_LDU2_2;
+                p25_hexword_ctr = 0;
+            } else {
+                //Copy previous received hexword to the buffer
+                for(int i = 0; i < 6; i++) {
+                    p25_ldu2_hex_data[12 - p25_ldu2_ctr][i] = p25_hexword[i];
+                }
+            }
+            p25_ldu2_ctr++;
+            if(p25_ldu2_ctr == 4+1) {
+                p25_ldu2_ctr = 0;
+                //Process IMBE frame and return to the next state
+                p25_imbe_statuscnt = p25_hexword_statuscnt;
+                p25_imbe_return = STATE_PROC_FRAME_P25_LDU2_3;
+                curr_state = STATE_PROC_FRAME_P25_IMBE;
+            } else {
+                curr_state = STATE_PROC_FRAME_P25_HEXWORD;
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_LDU2_3) {
+            // Read data after IMBE 4
+            if(p25_ldu2_ctr == 0) {
+                p25_hexword_statuscnt = p25_imbe_statuscnt; //move current status cnt from imbe to hexword receiver
+                p25_hexword_return = STATE_PROC_FRAME_P25_LDU2_3;
+                p25_hexword_ctr = 0;
+            } else {
+                //Copy previous received hexword to the buffer
+                for(int i = 0; i < 6; i++) {
+                    p25_ldu2_hex_data[8 - p25_ldu2_ctr][i] = p25_hexword[i];
+                }
+            }
+            p25_ldu2_ctr++;
+            if(p25_ldu2_ctr == 4+1) {
+                p25_ldu2_ctr = 0;
+                //Process IMBE frame and return to the next state
+                p25_imbe_statuscnt = p25_hexword_statuscnt;
+                p25_imbe_return = STATE_PROC_FRAME_P25_LDU2_4;
+                curr_state = STATE_PROC_FRAME_P25_IMBE;
+            } else {
+                curr_state = STATE_PROC_FRAME_P25_HEXWORD;
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_LDU2_4) {
+            // Read data after IMBE 5
+            if(p25_ldu2_ctr == 0) {
+                p25_hexword_statuscnt = p25_imbe_statuscnt; //move current status cnt from imbe to hexword receiver
+                p25_hexword_return = STATE_PROC_FRAME_P25_LDU2_4;
+                p25_hexword_ctr = 0;
+            } else {
+                //Copy previous received hexword to the buffer
+                for(int i = 0; i < 6; i++) {
+                    p25_ldu2_hex_data[4 - p25_ldu2_ctr][i] = p25_hexword[i];
+                }
+            }
+            p25_ldu2_ctr++;
+            if(p25_ldu2_ctr == 4+1) {
+                p25_ldu2_ctr = 0;
+                //Process IMBE frame and return to the next state
+                p25_imbe_statuscnt = p25_hexword_statuscnt;
+                p25_imbe_return = STATE_PROC_FRAME_P25_LDU2_5;
+                curr_state = STATE_PROC_FRAME_P25_IMBE;
+            } else {
+                curr_state = STATE_PROC_FRAME_P25_HEXWORD;
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_LDU2_5) {
+            // Read data after IMBE 6
+            if(p25_ldu2_ctr == 0) {
+                p25_hexword_statuscnt = p25_imbe_statuscnt; //move current status cnt from imbe to hexword receiver
+                p25_hexword_return = STATE_PROC_FRAME_P25_LDU2_5;
+                p25_hexword_ctr = 0;
+            } else {
+                //Copy previous received hexword to the buffer
+                for(int i = 0; i < 6; i++) {
+                    p25_ldu2_hex_parity[8 - p25_ldu2_ctr][i] = p25_hexword[i];
+                }
+            }
+            p25_ldu2_ctr++;
+            if(p25_ldu2_ctr == 4+1) {
+                p25_ldu2_ctr = 0;
+                //Process IMBE frame and return to the next state
+                p25_imbe_statuscnt = p25_hexword_statuscnt;
+                p25_imbe_return = STATE_PROC_FRAME_P25_LDU2_6;
+                curr_state = STATE_PROC_FRAME_P25_IMBE;
+            } else {
+                curr_state = STATE_PROC_FRAME_P25_HEXWORD;
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_LDU2_6) {
+            // Read data after IMBE 7
+            if(p25_ldu2_ctr == 0) {
+                p25_hexword_statuscnt = p25_imbe_statuscnt; //move current status cnt from imbe to hexword receiver
+                p25_hexword_return = STATE_PROC_FRAME_P25_LDU2_6;
+                p25_hexword_ctr = 0;
+            } else {
+                //Copy previous received hexword to the buffer
+                for(int i = 0; i < 6; i++) {
+                    p25_ldu2_hex_parity[4 - p25_ldu2_ctr][i] = p25_hexword[i];
+                }
+            }
+            p25_ldu2_ctr++;
+            if(p25_ldu2_ctr == 4+1) {
+                p25_ldu2_ctr = 0;
+                //Process IMBE frame 8 and return to the next state
+                p25_imbe_statuscnt = p25_hexword_statuscnt;
+                p25_imbe_return = STATE_PROC_FRAME_P25_LDU2_7;
+                curr_state = STATE_PROC_FRAME_P25_IMBE;
+            } else {
+                curr_state = STATE_PROC_FRAME_P25_HEXWORD;
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_LDU2_7) {
+            // Read data after IMBE 8: LSD (low speed data)
+            for(int i = 0; i < count; i++) {
+                dibit = in[i];
+                usedDibits++;
+                if(p25_imbe_statuscnt == 35) { //Using IMBE status counter, since it was the last one
+                    // TODO: do something useful with the status bits...
+                    p25_imbe_statuscnt = 0;
+                } else {
+                    p25_imbe_statuscnt++;
+                    if(p25_ldu2_ctr <= 6) {
+                        p25_ldu2_lsd[p25_ldu2_ctr+0] = (1 & (dibit >> 1));      // bit 1
+                        p25_ldu2_lsd[p25_ldu2_ctr+1] = (1 & dibit);             // bit 0
+                        p25_ldu2_ctr+=2;
+                    } else if(p25_ldu2_ctr <= 6+6) {
+                        p25_ldu2_lsd_cyclic_parity[p25_ldu2_ctr-6+0] = (1 & (dibit >> 1));      // bit 1
+                        p25_ldu2_lsd_cyclic_parity[p25_ldu2_ctr-6+1] = (1 & dibit);             // bit 0
+                        p25_ldu2_ctr+=2;
+                    } else if(p25_ldu2_ctr == 6+6+2) {
+                        for (int k=0; k<8; k++) {
+                            p25_ldu2_lsd1[k] = p25_ldu2_lsd[k] + '0';
+                        }
+                        p25_ldu2_lsd[p25_ldu2_ctr-(6+6)+0] = (1 & (dibit >> 1));      // bit 1
+                        p25_ldu2_lsd[p25_ldu2_ctr-(6+6)+1] = (1 & dibit);             // bit 0
+                        p25_ldu2_ctr+=2;
+                    } else if(p25_ldu2_ctr <= 6+6+6) {
+                        p25_ldu2_lsd[p25_ldu2_ctr-(6+6)+0] = (1 & (dibit >> 1));      // bit 1
+                        p25_ldu2_lsd[p25_ldu2_ctr-(6+6)+1] = (1 & dibit);             // bit 0
+                        p25_ldu2_ctr+=2;
+                    } else if(p25_ldu2_ctr <= 6+6+6+6) {
+                        p25_ldu2_lsd_cyclic_parity[p25_ldu2_ctr-(6+6+6)+0] = (1 & (dibit >> 1));      // bit 1
+                        p25_ldu2_lsd_cyclic_parity[p25_ldu2_ctr-(6+6+6)+1] = (1 & dibit);             // bit 0
+                        p25_ldu2_ctr+=2;
+                    } else {
+                      for (int k=0; k<8; k++) {
+                          p25_ldu2_lsd2[k] = p25_ldu2_lsd[k] + '0';
+                      }
+                      // TODO: error correction of the LSD bytes...
+                      // TODO: do something useful with the LSD bytes...
+                      p25_ldu2_ctr = 0;
+                      //Process IMBE frame 9 and return to the next state
+                      p25_imbe_return = STATE_PROC_FRAME_P25_LDU2_8;
+                      curr_state = STATE_PROC_FRAME_P25_IMBE;
+                      break;
+                    }
+                }
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_LDU2_8) {
+            // trailing status symbol
+            {
+                int status;
+                dibit = in[0];
+                usedDibits++;
+                status = dibit + '0';
+                // TODO: do something useful with the status bits...
+            }
+
+            // Error correct the hex_data using Reed-Solomon hex_parity
+            int irrecoverable_errors = p25_reed_solomon_24_16_9.decode((char*)p25_ldu2_hex_data, (char*)p25_ldu2_hex_parity);
+            if (irrecoverable_errors == 1) {
+                // We can correct (13-1)/2 = 6 errors. If we failed, it means that there were more than 6 errors in
+                // these 12+12 words.
+                p25_status.p25_status_irr_err = true;
+            } else {
+                // Same comments as in processHDU. See there.
+                p25_status.p25_status_irr_err = false;
+
+                char fixed_parity[8*6];
+
+                // Correct the dibits that we read according with hex_data values
+                P25correctHammingDibits((char*)p25_ldu2_hex_data, 16);
+
+                // Generate again the Reed-Solomon parity
+                p25_reed_solomon_24_16_9.encode((char*)p25_ldu2_hex_data, fixed_parity);
+
+                // Correct the dibits that we read according with the fixed parity values
+                P25correctHammingDibits(fixed_parity, 8);
+            }
+            // Now put the corrected data into the DSD structures
+            p25_status.p25_status_mi_0 = 0;
+            p25_status.p25_status_mi_1 = 0;
+            p25_status.p25_status_algid = 0;
+            p25_status.p25_status_kid = 0;
+            for(int i = 15; i >= 0; i--) {
+                for(int k = 0; k < 6; k++) {
+                    if(i >= 6) {
+                        //mi
+                        p25_status.p25_status_mi_0 |= ((uint64_t)p25_ldu2_hex_data[i][k]) << ((15-i)*6 + k);
+                    } else if(i == 5) {
+                        if(k <= 3) {
+                            p25_status.p25_status_mi_0 |= ((uint64_t)p25_ldu2_hex_data[i][k]) << ((15-i)*6 + k);
+                        } else {
+                            p25_status.p25_status_mi_1 |= ((uint64_t)p25_ldu2_hex_data[i][k]) << ((5-i)*6 + k - 4);
+                        }
+                    } else if(i == 4) {
+                        p25_status.p25_status_mi_1 |= ((uint64_t)p25_ldu2_hex_data[i][k]) << ((5-i)*6 + k - 4);
+                    } else if(i == 3) {
+                        //algid
+                        p25_status.p25_status_algid |= ((uint64_t)p25_ldu2_hex_data[i][k]) << (7 - ((3-i)*6 + k));
+                    } else if(i == 2) {
+                        if(k <= 1) {
+                            p25_status.p25_status_algid |= ((uint64_t)p25_ldu2_hex_data[i][k]) << (7 - ((3-i)*6 + k));
+                        } else {
+                            //kid
+                            p25_status.p25_status_kid |= ((uint64_t)p25_ldu2_hex_data[i][k]) << (15 - ((2-i)*6 + k - 2));
+                        }
+                    } else {
+                        p25_status.p25_status_kid |= ((uint64_t)p25_ldu2_hex_data[i][k]) << (15 - ((2-i)*6 + k - 2));
+                    }
+                }
+            }
+            mbe_status.mbe_status_decoding = false;
+            curr_state = STATE_SYNC;
+        }
+        return usedDibits;
+    }
+
+    int NewDSD::processP25TDULC(int count, const uint8_t* in) {
+        int usedDibits = 0;
+        int dibit;
+        if(curr_state == STATE_PROC_FRAME_P25_TDULC) {
+            if(p25_tdulc_ctr == 0) {
+                // we skip the status dibits that occur every 36 symbols
+                // the first IMBE frame starts 14 symbols before next status
+                // so we start counter at 36-14-1 = 21
+                p25_dodecaword_statuscnt = 21;
+                p25_dodecaword_return = STATE_PROC_FRAME_P25_TDULC;
+            } else {
+                // Store the corrected dodeca word into the dodeca_data store:
+                for (int j=0; j<6; j++) {
+                    p25_tdulc_dodeca_data[(6 - p25_tdulc_ctr)][j] = p25_dodecaword[j];
+                }
+            }
+            p25_tdulc_ctr++;
+            if(p25_tdulc_ctr == 6+1) {
+                p25_tdulc_ctr = 0;
+                curr_state = STATE_PROC_FRAME_P25_TDULC_1;
+            } else {
+                curr_state = STATE_PROC_FRAME_P25_DODECAWORD;
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_TDULC_1) {
+            if(p25_tdulc_ctr == 0) {
+                p25_dodecaword_return = STATE_PROC_FRAME_P25_TDULC_1;
+            } else {
+                // Store the corrected dodeca word into the dodeca_parity store:
+                for (int j=0; j<6; j++) {
+                    p25_tdulc_dodeca_parity[(6 - p25_tdulc_ctr)][j] = p25_dodecaword[j];
+                }
+            }
+            p25_tdulc_ctr++;
+            if(p25_tdulc_ctr == 6+1) {
+                p25_tdulc_ctr = 0;
+                p25_tdulc_statuscnt = p25_dodecaword_statuscnt;
+                curr_state = STATE_PROC_FRAME_P25_TDULC_2;
+            } else {
+                curr_state = STATE_PROC_FRAME_P25_DODECAWORD;
+            }
+        } else if(curr_state == STATE_PROC_FRAME_P25_TDULC_2) {
+
+            for(int i = 0; i < count; i++) {
+                dibit = in[i];
+                usedDibits++;
+                if(p25_tdulc_statuscnt == 35) {
+                    // TODO: do something useful with the status bits...
+                    p25_tdulc_statuscnt = 0;
+                } else {
+                    // Next 10 dibits should be zeros
+                    if(p25_tdulc_ctr == 13) {
+                        // Next we should find an status dibit
+                        if (p25_tdulc_statuscnt != 35) {
+                //            printf("*** SYNC ERROR\n");
+                        }
+                        p25_tdulc_statuscnt = 0;
+                    }
+                    if(p25_tdulc_ctr == 14) {
+                        // trailing status symbol
+                        {
+                            int status;
+                            status = dibit + '0';
+                            // TODO: do something useful with the status bits...
+                        }
+                        p25_tdulc_statuscnt = 0;
+                        p25_tdulc_ctr = 0;
+
+                        // Swap the two 6-bit words to accommodate for the expected word order of the Reed-Solomon decoding
+                        P25swapHexWords((char*)p25_tdulc_dodeca_data, (char*)p25_tdulc_dodeca_parity);
+
+                        // Error correct the hex_data using Reed-Solomon hex_parity
+                        int irrecoverable_errors = p25_reed_solomon_24_12_13.decode((char*)p25_tdulc_dodeca_data, (char*)p25_tdulc_dodeca_parity);
+
+                        // Recover the original order
+                        P25swapHexWords((char*)p25_tdulc_dodeca_data, (char*)p25_tdulc_dodeca_parity);
+
+                        if (irrecoverable_errors == 1) {
+                            // We can correct (13-1)/2 = 6 errors. If we failed, it means that there were more than 6 errors in
+                            // these 12+12 words.
+                            p25_status.p25_status_irr_err = true;
+                        } else {
+                            // Same comments as in processHDU. See there.
+                            p25_status.p25_status_irr_err = false;
+
+                            char fixed_parity[6*12];
+
+                            // Correct the dibits that we read according with hex_data values
+                            P25correctGolayDibits12((char*)p25_tdulc_dodeca_data, 6);
+
+                            // Generate again the Reed-Solomon parity
+                            // Now, swap again for Reed-Solomon
+                            P25swapHexWords((char*)p25_tdulc_dodeca_data, (char*)p25_tdulc_dodeca_parity);
+                            p25_reed_solomon_24_12_13.encode((char*)p25_tdulc_dodeca_data, fixed_parity);
+                            // Swap again to recover the original order
+                            P25swapHexWords((char*)p25_tdulc_dodeca_data, fixed_parity);
+
+                            // Correct the dibits that we read according with the fixed parity values
+                            P25correctGolayDibits12(fixed_parity, 6);
+                        }
+                        // Put the corrected data into the DSD structures
+                        p25_status.p25_status_mfid = 0;
+                        p25_status.p25_status_lcformat = 0;
+                        p25_status.p25_status_lcinfo = 0;
+                        for(int i = 5; i >= 0; i--) {
+                            for(int k = 0; k < 12; k++) {
+                                if(i == 5) {
+                                    if(k <= 7) {
+                                        //lcformat
+                                        p25_status.p25_status_lcformat |= ((uint64_t)p25_tdulc_dodeca_data[i][k]) << ((5-i)*12 + k);
+                                    } else {
+                                        //mfid
+                                        p25_status.p25_status_mfid |= ((uint64_t)p25_tdulc_dodeca_data[i][k]) << ((5-i)*12 + k - 8);
+                                    }
+                                } else if(i == 4) {
+                                    if(k <= 3) {
+                                        p25_status.p25_status_mfid |= ((uint64_t)p25_tdulc_dodeca_data[i][k]) << ((5-i)*12 + k - 8);
+                                    } else {
+                                        //lcinfo
+                                        p25_status.p25_status_lcinfo |= ((uint64_t)p25_tdulc_dodeca_data[i][k]) << ((4-i)*12 + k - 4);
+                                    }
+                                } else {
+                                    p25_status.p25_status_lcinfo |= ((uint64_t)p25_tdulc_dodeca_data[i][k]) << ((4-i)*12 + k - 4);
+                                }
+                            }
+                        }
+                        P25updatelcwstatus();
+                        curr_state = STATE_SYNC;
+                        break;
+                    }
+                    //Reading zeros
+                    p25_tdulc_statuscnt++;
+                    p25_tdulc_ctr++;
+                }
+            }
+        }
+        curr_state = STATE_SYNC;
+        return usedDibits;
+    }
+
+    int NewDSD::processP25TDU(int count, const uint8_t* in) {
+        int usedDibits = 0;
+        int dibit;
+        if(curr_state == STATE_PROC_FRAME_P25_TDU) {
+            for(int i = 0; i < count; i++) {
+                dibit = in[i];
+                usedDibits++;
+                if(p25_tdu_statuscnt == 35) {
+                    // TODO: do something useful with the status bits...
+                    p25_tdu_statuscnt = 0;
+                } else {
+                    if(p25_tdu_ctr == 0) {
+                        // we skip the status dibits that occur every 36 symbols
+                        // the first IMBE frame starts 14 symbols before next status
+                        // so we start counter at 36-14-1 = 21
+                        p25_tdu_statuscnt = 21;
+                    }
+                    if(p25_tdu_ctr == 13) {
+                        // Next we should find an status dibit
+                        if (p25_tdu_statuscnt != 35) {
+                //            printf("*** SYNC ERROR\n");
+                        }
+                        p25_tdu_statuscnt = 0;
+                    }
+                    if(p25_tdu_ctr == 14) {
+                        // trailing status symbol
+                        {
+                            int status;
+                            status = dibit + '0';
+                            // TODO: do something useful with the status bits...
+                        }
+                        p25_tdu_statuscnt = 0;
+                        p25_tdu_ctr = 0;
+                        curr_state = STATE_SYNC;
+                        break;
+                    }
+                    //Reading zeros
+                    p25_tdu_statuscnt++;
+                    p25_tdu_ctr++;
+                }
+
+            }
+        }
+        return usedDibits;
+
+
+    }
+
+    int NewDSD::processP25TSDU(int count, const uint8_t* in) {
+
+        int usedDibits = 0;
+        int dibit;
+        if(curr_state == STATE_PROC_FRAME_P25_TSDU) {
+            // Now processing NID
+            for(int i = 0; i < count; i++) {
+                dibit = in[i];
+                usedDibits++;
+                p25_tsdu_ctr++;
+                if(p25_tsdu_ctr == 328-25) {
+                    p25_tsdu_ctr = 0;
+                    curr_state = STATE_SYNC;
+                    break;
+                }
+            }
+        }
+        return usedDibits;
+    }
+
+    int NewDSD::processP25PDU(int count, const uint8_t* in) {
+        curr_state = STATE_SYNC;
+        return 0;
+    }
+
+
+
+
+
+
+
+
+
+
     void DSD::P25processlcw (char *lcformat, char *mfid, char *lcinfo) {
         char tgid[17], tmpstr[255];
         long talkgroup, source;

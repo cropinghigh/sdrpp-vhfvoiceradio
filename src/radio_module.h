@@ -63,11 +63,6 @@ public:
         selectedDemodID = config.conf[name]["selectedDemodId"];
         config.release(created);
 
-        // Create demodulator instances
-        demods.fill(NULL);
-        demods[RADIO_DEMOD_DSD] = new demod::DSD();
-        demods[RADIO_DEMOD_NFM] = new demod::NFM();
-
         // Initialize the VFO
         vfo = sigpath::vfoManager.createVFO(name, ImGui::WaterfallVFO::REF_CENTER, 0, 200000, 200000, 50000, 200000, false);
         onUserChangedBandwidthHandler.handler = vfoUserChangedBandwidthHandler;
@@ -86,28 +81,6 @@ public:
         ifChain.addBlock(&nb, false);
         ifChain.addBlock(&squelch, false);
         ifChain.addBlock(&fmnr, false);
-
-        // Load configuration for and enabled all demodulators
-        for (auto& demod : demods) {
-            if (!demod) { continue; }
-
-            // Default config
-            double bw = demod->getDefaultBandwidth();
-            if (!config.conf[name].contains(demod->getName())) {
-                config.conf[name][demod->getName()]["bandwidth"] = bw;
-                config.conf[name][demod->getName()]["snapInterval"] = demod->getDefaultSnapInterval();
-                config.conf[name][demod->getName()]["squelchLevel"] = MIN_SQUELCH;
-                config.conf[name][demod->getName()]["squelchEnabled"] = false;
-                config.conf[name][demod->getName()]["ctcssFrequency"] = ctcssFreq;
-                config.conf[name][demod->getName()]["ctcssEnabled"] = false;
-                config.conf[name][demod->getName()]["dcsCode"] = ctcssFreq;
-                config.conf[name][demod->getName()]["dcsEnabled"] = false;
-            }
-            bw = std::clamp<double>(bw, demod->getMinBandwidth(), demod->getMaxBandwidth());
-
-            // Initialize
-            demod->init(name, &config, ifChain.out, bw, stream.getSampleRate());
-        }
 
         // Initialize audio DSP chain
         afChain.init(&dummyAudioStream);
@@ -131,7 +104,6 @@ public:
 
         // Select the demodulator
         selectDemodByID((DemodID)selectedDemodID);
-//        selectDemodByID((DemodID)0);
 
         // Start IF chain
         ifChain.start();
@@ -191,6 +163,7 @@ public:
     enum DemodID {
         RADIO_DEMOD_NFM,
         RADIO_DEMOD_DSD,
+        RADIO_DEMOD_OLDDSD,
         _RADIO_DEMOD_COUNT,
     };
 
@@ -210,6 +183,10 @@ private:
         ImGui::NextColumn();
         if (ImGui::RadioButton(CONCAT("DSD##_", _this->name), _this->selectedDemodID == 1) && _this->selectedDemodID != 1) {
             _this->selectDemodByID(RADIO_DEMOD_DSD);
+        }
+        ImGui::NextColumn();
+        if (ImGui::RadioButton(CONCAT("OLD DSD##_", _this->name), _this->selectedDemodID == 2) && _this->selectedDemodID != 2) {
+            _this->selectDemodByID(RADIO_DEMOD_OLDDSD);
         }
         ImGui::Columns(1, CONCAT("EndRadioModeColumns##_", _this->name), false);
 
@@ -347,8 +324,39 @@ private:
         if (!_this->enabled) { style::endDisabled(); }
     }
 
+    demod::Demodulator* instantiateDemod(DemodID id) {
+            demod::Demodulator* demod = NULL;
+            switch (id) {
+                case DemodID::RADIO_DEMOD_NFM:  demod = new demod::NFM(); break;
+                case DemodID::RADIO_DEMOD_DSD:  demod = new demod::DSD(); break;
+                case DemodID::RADIO_DEMOD_OLDDSD:  demod = new demod::OldDSD(); break;
+                default:                        demod = NULL; break;
+            }
+            if (!demod) { return NULL; }
+
+            // Default config
+            double bw = demod->getDefaultBandwidth();
+            if (!config.conf[name].contains(demod->getName())) {
+                config.conf[name][demod->getName()]["bandwidth"] = bw;
+                config.conf[name][demod->getName()]["snapInterval"] = demod->getDefaultSnapInterval();
+                config.conf[name][demod->getName()]["squelchLevel"] = MIN_SQUELCH;
+                config.conf[name][demod->getName()]["squelchEnabled"] = false;
+                config.conf[name][demod->getName()]["ctcssFrequency"] = ctcssFreq;
+                config.conf[name][demod->getName()]["ctcssEnabled"] = false;
+                config.conf[name][demod->getName()]["dcsCode"] = ctcssFreq;
+                config.conf[name][demod->getName()]["dcsEnabled"] = false;
+            }
+            bw = std::clamp<double>(bw, demod->getMinBandwidth(), demod->getMaxBandwidth());
+
+            // Initialize
+            demod->init(name, &config, ifChain.out, bw, stream.getSampleRate());
+
+            return demod;
+        }
+
     void selectDemodByID(DemodID id) {
-        demod::Demodulator* demod = demods[id];
+        auto startTime = std::chrono::high_resolution_clock::now();
+        demod::Demodulator* demod = instantiateDemod(id);
         if (!demod) {
             flog::error("Demodulator {0} not implemented", static_cast<int>(id));
             return;
@@ -360,11 +368,17 @@ private:
         config.acquire();
         config.conf[name]["selectedDemodId"] = id;
         config.release(true);
+        auto endTime = std::chrono::high_resolution_clock::now();
+        flog::warn("Demod switch took {0} us", (int64_t)((std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime)).count()));
     }
 
     void selectDemod(demod::Demodulator* demod) {
         // Stop currently selected demodulator and select new
-        if (selectedDemod) { selectedDemod->stop(); }
+        afChain.setInput(&dummyAudioStream, [=](dsp::stream<dsp::stereo_t>* out){ stream.setInput(out); });
+        if (selectedDemod) {
+            selectedDemod->stop();
+            delete selectedDemod;
+        }
         selectedDemod = demod;
 
         // Give the demodulator the most recent audio SR
@@ -818,7 +832,6 @@ private:
 
     SinkManager::Stream stream;
 
-    std::array<demod::Demodulator*, _RADIO_DEMOD_COUNT> demods;
     demod::Demodulator* selectedDemod = NULL;
 
     OptionList<std::string, DeemphasisMode> deempModes;

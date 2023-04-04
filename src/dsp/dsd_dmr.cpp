@@ -1,6 +1,367 @@
 #include "dsd.h"
 
 namespace dsp { 
+
+    int NewDSD::processDMRdata(int count, const uint8_t* in) {
+        int usedDibits = 0;
+        if(curr_state == STATE_PROC_FRAME_DMR_DATA) {
+            char cc[5];
+            char bursttype[5];
+            cc[4] = 0;
+            bursttype[4] = 0;
+            char syncdata[25];
+            char sync[25];
+            int currentslot;
+            dmr_dibitBuffP = fss_dibitBufP - 90;
+            // CACH
+            for (int i = 0; i < 12; i++) {
+                int dibit = dibitBuf[dmr_dibitBuffP++];
+                //TODO: use CACH
+                if (i == 2) {
+                    currentslot = (1 & (dibit >> 1));      // bit 1
+                }
+            }
+            dmr_dibitBuffP += 49;
+            int dibit = dibitBuf[dmr_dibitBuffP++];
+            cc[0] = (1 & (dibit >> 1)) + 48;      // bit 1
+            cc[1] = (1 & dibit) + 48;     // bit 0
+
+            dibit = dibitBuf[dmr_dibitBuffP++];
+            cc[2] = (1 & (dibit >> 1)) + 48;      // bit 1
+            cc[3] = (1 & dibit) + 48;     // bit 0
+
+            dibit = dibitBuf[dmr_dibitBuffP++];
+            bursttype[0] = (1 & (dibit >> 1)) + 48;       // bit 1
+            bursttype[1] = (1 & dibit) + 48;      // bit 0
+
+            dibit = dibitBuf[dmr_dibitBuffP++];
+            bursttype[2] = (1 & (dibit >> 1)) + 48;       // bit 1
+            bursttype[3] = (1 & dibit) + 48;      // bit 0
+
+            // parity bit
+            dibit = dibitBuf[dmr_dibitBuffP++];
+
+            ((currentslot == 0) ? dmr_status.dmr_status_s0_lastburstt : dmr_status.dmr_status_s1_lastburstt) = strtol(bursttype, NULL, 2);
+
+            if (strcmp (bursttype, "0000") == 0) {
+                ((currentslot == 0) ? dmr_status.dmr_status_s0_lasttype : dmr_status.dmr_status_s1_lasttype) = "PI Header";
+            } else if (strcmp (bursttype, "0001") == 0) {
+                ((currentslot == 0) ? dmr_status.dmr_status_s0_lasttype : dmr_status.dmr_status_s1_lasttype) = "VOICE Header";
+            } else if (strcmp (bursttype, "0010") == 0) {
+                ((currentslot == 0) ? dmr_status.dmr_status_s0_lasttype : dmr_status.dmr_status_s1_lasttype) = "TLC";
+            } else if (strcmp (bursttype, "0011") == 0) {
+                ((currentslot == 0) ? dmr_status.dmr_status_s0_lasttype : dmr_status.dmr_status_s1_lasttype) = "CSBK";
+            } else if (strcmp (bursttype, "0100") == 0) {
+                ((currentslot == 0) ? dmr_status.dmr_status_s0_lasttype : dmr_status.dmr_status_s1_lasttype) = "MBC Header";
+            } else if (strcmp (bursttype, "0101") == 0) {
+                ((currentslot == 0) ? dmr_status.dmr_status_s0_lasttype : dmr_status.dmr_status_s1_lasttype) = "MBC";
+            } else if (strcmp (bursttype, "0110") == 0) {
+                ((currentslot == 0) ? dmr_status.dmr_status_s0_lasttype : dmr_status.dmr_status_s1_lasttype) = "DATA Header";
+            } else if (strcmp (bursttype, "0111") == 0) {
+                ((currentslot == 0) ? dmr_status.dmr_status_s0_lasttype : dmr_status.dmr_status_s1_lasttype) = "RATE 1/2 DATA";
+            } else if (strcmp (bursttype, "1000") == 0) {
+                ((currentslot == 0) ? dmr_status.dmr_status_s0_lasttype : dmr_status.dmr_status_s1_lasttype) = "RATE 3/4 DATA";
+            } else if (strcmp (bursttype, "1001") == 0) {
+                ((currentslot == 0) ? dmr_status.dmr_status_s0_lasttype : dmr_status.dmr_status_s1_lasttype) = "Idle";
+            } else if (strcmp (bursttype, "1010") == 0) {
+                ((currentslot == 0) ? dmr_status.dmr_status_s0_lasttype : dmr_status.dmr_status_s1_lasttype) = "RATE 1 DATA";
+            } else {
+                ((currentslot == 0) ? dmr_status.dmr_status_s0_lasttype : dmr_status.dmr_status_s1_lasttype) = "UNK";
+            }
+
+            for (int i = 0; i < 24; i++) {
+                dibit = dibitBuf[dmr_dibitBuffP++] | 0b01;
+                syncdata[i] = dibit;
+                sync[i] = (dibit | 1) + 48;
+            }
+            sync[24] = 0;
+            syncdata[24] = 0;
+
+            curr_state = STATE_PROC_FRAME_DMR_DATA_1;
+            skipCtr = 0;
+        } else if(curr_state == STATE_PROC_FRAME_DMR_DATA_1) {
+            // current slot second half, cach, next slot 1st half
+            for(int i = 0; i < count; i++) {
+                if (fss_dibitBufP > 900000) {
+                    fss_dibitBufP = 200;
+                }
+                dibitBuf[fss_dibitBufP++] = in[i];
+                usedDibits++;
+                skipCtr++;
+                if(skipCtr == 120) {
+                    curr_state = STATE_SYNC;
+                    break;
+                }
+            }
+        }
+        return usedDibits;
+    }
+
+    const int NewDSD::dmrv_const_rW[] = {
+        0, 1, 0, 1, 0, 1,
+        0, 1, 0, 1, 0, 1,
+        0, 1, 0, 1, 0, 1,
+        0, 1, 0, 1, 0, 2,
+        0, 2, 0, 2, 0, 2,
+        0, 2, 0, 2, 0, 2
+    };
+
+    const int NewDSD::dmrv_const_rX[] = {
+       23, 10, 22, 9, 21, 8,
+       20, 7, 19, 6, 18, 5,
+       17, 4, 16, 3, 15, 2,
+       14, 1, 13, 0, 12, 10,
+       11, 9, 10, 8, 9, 7,
+       8, 6, 7, 5, 6, 4
+    };
+
+    const int NewDSD::dmrv_const_rY[] = {
+       0, 2, 0, 2, 0, 2,
+       0, 2, 0, 3, 0, 3,
+       1, 3, 1, 3, 1, 3,
+       1, 3, 1, 3, 1, 3,
+       1, 3, 1, 3, 1, 3,
+       1, 3, 1, 3, 1, 3
+    };
+
+    const int NewDSD::dmrv_const_rZ[] = {
+        5, 3, 4, 2, 3, 1,
+        2, 0, 1, 13, 0, 12,
+        22, 11, 21, 10, 20, 9,
+        19, 8, 18, 7, 17, 6,
+        16, 5, 15, 4, 14, 3,
+        13, 2, 12, 1, 11, 0
+    };
+
+    int NewDSD::processDMRvoice(int count, const uint8_t* in, short* out, int* outcnt) {
+        int usedDibits = 0;
+        int dibit;
+        if(curr_state == STATE_PROC_FRAME_DMR_VOICE) {
+            dmr_dibitBuffP = fss_dibitBufP - 144;
+            dmrv_iter = 0;
+            dmrv_ctr = 0;
+            dmrv_muteslot = false;
+            mbe_status.mbe_status_decoding = true;
+            mbe_status.mbe_status_errorbar = "";
+            curr_state = STATE_PROC_FRAME_DMR_VOICE_1;
+        } else if(curr_state == STATE_PROC_FRAME_DMR_VOICE_1) {
+            // 2nd half of previous slot
+            for(int i = 0; i < count; i++) {
+                if (dmrv_iter > 0) {
+                    dibit = in[i];
+                    usedDibits++;
+                } else {
+                    dibit = dibitBuf[dmr_dibitBuffP++];
+                }
+                dmrv_ctr++;
+                if(dmrv_ctr == 54) {
+                    dmrv_ctr = 0;
+                    curr_state = STATE_PROC_FRAME_DMR_VOICE_2;
+                    break;
+                }
+            }
+        } else if(curr_state == STATE_PROC_FRAME_DMR_VOICE_2) {
+            for(int i = 0; i < count; i++) {
+                // CACH
+                if (dmrv_iter > 0) {
+                    dibit = in[i];
+                    usedDibits++;
+                } else {
+                    dibit = dibitBuf[dmr_dibitBuffP++];
+                }
+                //TODO: use CACH
+                if (dmrv_ctr == 2) {
+                    int currentslot = (1 & (dibit >> 1));  // bit 1
+                    dmr_lastslot = currentslot;
+                }
+                dmrv_ctr++;
+                if(dmrv_ctr == 12) {
+                    dmrv_ctr = 0;
+                    curr_state = STATE_PROC_FRAME_DMR_VOICE_3;
+                    dmrv_w_ctr = 0;
+                    dmrv_x_ctr = 0;
+                    dmrv_y_ctr = 0;
+                    dmrv_z_ctr = 0;
+                    break;
+                }
+            }
+        } else if(curr_state == STATE_PROC_FRAME_DMR_VOICE_3) {
+            // current slot frame 1
+            for(int i = 0; i < count; i++) {
+                if (dmrv_iter > 0) {
+                    dibit = in[i];
+                    usedDibits++;
+                } else {
+                    dibit = dibitBuf[dmr_dibitBuffP++];
+                }
+                dmrv_ambe_fr[dmrv_const_rW[dmrv_w_ctr]][dmrv_const_rX[dmrv_x_ctr]] = (1 & (dibit >> 1)); // bit 1
+                dmrv_ambe_fr[dmrv_const_rY[dmrv_y_ctr]][dmrv_const_rZ[dmrv_z_ctr]] = (1 & dibit);        // bit 0
+                dmrv_w_ctr++;
+                dmrv_x_ctr++;
+                dmrv_y_ctr++;
+                dmrv_z_ctr++;
+                dmrv_ctr++;
+                if(dmrv_ctr == 36) {
+                    dmrv_ctr = 0;
+                    curr_state = STATE_PROC_FRAME_DMR_VOICE_4;
+                    dmrv_w_ctr = 0;
+                    dmrv_x_ctr = 0;
+                    dmrv_y_ctr = 0;
+                    dmrv_z_ctr = 0;
+                    break;
+                }
+            }
+        } else if(curr_state == STATE_PROC_FRAME_DMR_VOICE_4) {
+            // current slot frame 2 first half
+            for(int i = 0; i < count; i++) {
+                if (dmrv_iter > 0) {
+                    dibit = in[i];
+                    usedDibits++;
+                } else {
+                    dibit = dibitBuf[dmr_dibitBuffP++];
+                }
+                dmrv_ambe_fr2[dmrv_const_rW[dmrv_w_ctr]][dmrv_const_rX[dmrv_x_ctr]] = (1 & (dibit >> 1)); // bit 1
+                dmrv_ambe_fr2[dmrv_const_rY[dmrv_y_ctr]][dmrv_const_rZ[dmrv_z_ctr]] = (1 & dibit);        // bit 0
+                dmrv_w_ctr++;
+                dmrv_x_ctr++;
+                dmrv_y_ctr++;
+                dmrv_z_ctr++;
+                dmrv_ctr++;
+                if(dmrv_ctr == 18) {
+                    dmrv_ctr = 0;
+                    curr_state = STATE_PROC_FRAME_DMR_VOICE_5;
+                    break;
+                }
+            }
+        } else if(curr_state == STATE_PROC_FRAME_DMR_VOICE_5) {
+            // signaling data or sync
+            for(int i = 0; i < count; i++) {
+                if (dmrv_iter > 0) {
+                    dibit = in[i];
+                    usedDibits++;
+                } else {
+                    dibit = dibitBuf[dmr_dibitBuffP++];
+                }
+                //TODO: use signaling data
+                dmrv_sync[i] = (dibit | 1) + 48;
+                dmrv_ctr++;
+                if(dmrv_ctr == 24) {
+                    dmrv_ctr = 0;
+                    dmrv_sync[24] = 0;
+                    dmrv_syncdata[24] = 0;
+                    if ((strcmp (dmrv_sync, DMR_BS_DATA_SYNC) == 0) || (strcmp (dmrv_sync, DMR_MS_DATA_SYNC) == 0)) {
+                        dmrv_muteslot = true;
+                    } else if ((strcmp (dmrv_sync, DMR_BS_VOICE_SYNC) == 0) || (strcmp (dmrv_sync, DMR_MS_VOICE_SYNC) == 0)) {
+                        dmrv_muteslot = false;
+                    }
+                    if ((strcmp (dmrv_sync, DMR_MS_VOICE_SYNC) == 0) || (strcmp (dmrv_sync, DMR_MS_DATA_SYNC) == 0)) {
+                        //msMode is on, but i'm not sure it's required
+                    }
+                    if(dmrv_iter == 0) {
+                        ((dmr_lastslot == 0) ? dmr_status.dmr_status_s0_lasttype : dmr_status.dmr_status_s1_lasttype) = "VOICE";
+                    }
+                    curr_state = STATE_PROC_FRAME_DMR_VOICE_6;
+                    break;
+                }
+            }
+        } else if(curr_state == STATE_PROC_FRAME_DMR_VOICE_6) {
+            // current slot frame 2 second half
+            for(int i = 0; i < count; i++) {
+                dibit = in[i];
+                usedDibits++;
+                dmrv_ambe_fr2[dmrv_const_rW[dmrv_w_ctr]][dmrv_const_rX[dmrv_x_ctr]] = (1 & (dibit >> 1)); // bit 1
+                dmrv_ambe_fr2[dmrv_const_rY[dmrv_y_ctr]][dmrv_const_rZ[dmrv_z_ctr]] = (1 & dibit);        // bit 0
+                dmrv_w_ctr++;
+                dmrv_x_ctr++;
+                dmrv_y_ctr++;
+                dmrv_z_ctr++;
+                dmrv_ctr++;
+                if(dmrv_ctr == 18) {
+                    dmrv_ctr = 0;
+                    if (!dmrv_muteslot) {
+                        int processed = 0;
+                        processMbeFrame (NULL, dmrv_ambe_fr, NULL, out, &processed);
+                        processMbeFrame (NULL, dmrv_ambe_fr2, NULL, &(out[processed]), &processed);
+                        *outcnt += processed;
+                    }
+                    dmrv_w_ctr = 0;
+                    dmrv_x_ctr = 0;
+                    dmrv_y_ctr = 0;
+                    dmrv_z_ctr = 0;
+                    curr_state = STATE_PROC_FRAME_DMR_VOICE_7;
+                    break;
+                }
+            }
+        } else if(curr_state == STATE_PROC_FRAME_DMR_VOICE_7) {
+            // current slot frame 3
+            for(int i = 0; i < count; i++) {
+                dibit = in[i];
+                usedDibits++;
+                dmrv_ambe_fr3[dmrv_const_rW[dmrv_w_ctr]][dmrv_const_rX[dmrv_x_ctr]] = (1 & (dibit >> 1)); // bit 1
+                dmrv_ambe_fr3[dmrv_const_rY[dmrv_y_ctr]][dmrv_const_rZ[dmrv_z_ctr]] = (1 & dibit);        // bit 0
+                dmrv_w_ctr++;
+                dmrv_x_ctr++;
+                dmrv_y_ctr++;
+                dmrv_z_ctr++;
+                dmrv_ctr++;
+                if(dmrv_ctr == 36) {
+                    dmrv_ctr = 0;
+                    if (!dmrv_muteslot) {
+                        processMbeFrame (NULL, dmrv_ambe_fr3, NULL, out, outcnt);
+                    }
+                    curr_state = STATE_PROC_FRAME_DMR_VOICE_8;
+                    break;
+                }
+            }
+        } else if(curr_state == STATE_PROC_FRAME_DMR_VOICE_8) {
+            // CACH + next slot + signaling data or sync
+            for(int i = 0; i < count; i++) {
+                dibit = in[i];
+                usedDibits++;
+                //TODO: use CACH
+                dmrv_ctr++;
+                if(dmrv_ctr == 12 + 54 + 24) {
+                    dmrv_ctr = 0;
+                    curr_state = STATE_PROC_FRAME_DMR_VOICE_9;
+                    break;
+                }
+            }
+        } else if(curr_state == STATE_PROC_FRAME_DMR_VOICE_9) {
+            if (dmrv_iter == 5) {
+                // 2nd half next slot + CACH + first half current slot
+                for(int i = 0; i < count; i++) {
+                    dibit = in[i];
+                    usedDibits++;
+                    dmrv_ctr++;
+                    if(dmrv_ctr == 54 + 12 + 54) {
+                        dmrv_ctr = 0;
+                        curr_state = STATE_PROC_FRAME_DMR_VOICE_10;
+                        break;
+                    }
+                }
+            } else {
+                curr_state = STATE_PROC_FRAME_DMR_VOICE_10;
+            }
+        } else if(curr_state == STATE_PROC_FRAME_DMR_VOICE_10) {
+            dmrv_iter++;
+            if(dmrv_iter >= 6) {
+                mbe_status.mbe_status_decoding = false;
+                curr_state = STATE_SYNC;
+            } else {
+                curr_state = STATE_PROC_FRAME_DMR_VOICE_1;
+            }
+        }
+        return usedDibits;
+    }
+
+
+
+
+
+
+
+
+
     void DSD::processDMRdata () {
         int i, dibit;
         int *dibit_p;

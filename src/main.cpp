@@ -4,7 +4,7 @@ SDRPP_MOD_INFO{
     /* Name:            */ "vhfvoiceradio",
     /* Description:     */ "Modified radio decoder for V/UHF voice",
     /* Author:          */ "cropinghigh",
-    /* Version:         */ 0, 0, 3,
+    /* Version:         */ 0, 0, 6,
     /* Max instances    */ -1
 };
 

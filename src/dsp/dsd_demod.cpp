@@ -2,6 +2,235 @@
 
 namespace dsp {
 
+        int NewDSD::process(int count, const uint8_t* in, short* out) {
+            int pos = 0;
+            int outcnt = 0;
+            while((count-pos) > 0) {
+                switch(curr_state) {
+                    case STATE_NOT_ENOUGH_DATA:
+                    case STATE_NO_SYNC:
+                    case STATE_SYNC:
+                        pos += findFrameSync((count-pos), &in[pos]);
+                        break;
+                    case STATE_FSFND_DMR_DATA:
+                    case STATE_FSFND_DMR_VOICE:
+                    case STATE_FSFND_P25:
+                        framesyncSymbolsRead = 0;
+                        framesynctest_p = 25;
+                        if(curr_state == STATE_FSFND_DMR_DATA) {
+                            curr_state = STATE_PROC_FRAME_DMR_DATA;
+                        } else if(curr_state == STATE_FSFND_DMR_VOICE) {
+                            curr_state = STATE_PROC_FRAME_DMR_VOICE;
+                        } else if(curr_state == STATE_FSFND_P25) {
+                            p25_frame_ctr = 0;
+                            p25_bch_code_idx = 0;
+                            curr_state = STATE_PROC_FRAME_P25;
+                        }
+                        break;
+                    case STATE_PROC_FRAME_DMR_DATA:
+                    case STATE_PROC_FRAME_DMR_DATA_1:
+                        pos += processDMRdata((count-pos), &in[pos]);
+                        break;
+                    case STATE_PROC_FRAME_DMR_VOICE:
+                    case STATE_PROC_FRAME_DMR_VOICE_1:
+                    case STATE_PROC_FRAME_DMR_VOICE_2:
+                    case STATE_PROC_FRAME_DMR_VOICE_3:
+                    case STATE_PROC_FRAME_DMR_VOICE_4:
+                    case STATE_PROC_FRAME_DMR_VOICE_5:
+                    case STATE_PROC_FRAME_DMR_VOICE_6:
+                    case STATE_PROC_FRAME_DMR_VOICE_7:
+                    case STATE_PROC_FRAME_DMR_VOICE_8:
+                    case STATE_PROC_FRAME_DMR_VOICE_9:
+                    case STATE_PROC_FRAME_DMR_VOICE_10:
+                        pos += processDMRvoice((count-pos), &in[pos], &(out[outcnt]), &outcnt);
+                        break;
+                    case STATE_PROC_FRAME_P25:
+                    case STATE_PROC_FRAME_P25_1:
+                    case STATE_PROC_FRAME_P25_2:
+                    case STATE_PROC_FRAME_P25_3:
+                        pos += processP25frame((count-pos), &in[pos]);
+                        break;
+                    case STATE_PROC_FRAME_P25_HEXWORD:
+                    case STATE_PROC_FRAME_P25_HEXWORD_G24_1:
+                    case STATE_PROC_FRAME_P25_HEXWORD_HAMM_1:
+                        pos += processP25HexWord((count-pos), &in[pos]);
+                        break;
+                    case STATE_PROC_FRAME_P25_DODECAWORD:
+                    case STATE_PROC_FRAME_P25_DODECAWORD_1:
+                        pos += processP25DodecaWord((count-pos), &in[pos]);
+                        break;
+                    case STATE_PROC_FRAME_P25_IMBE:
+                        pos += processP25IMBEFrame((count-pos), &in[pos], &(out[outcnt]), &outcnt);
+                        break;
+                    case STATE_PROC_FRAME_P25_HDU:
+                    case STATE_PROC_FRAME_P25_HDU_1:
+                    case STATE_PROC_FRAME_P25_HDU_2:
+                        pos += processP25HDU((count-pos), &in[pos]);
+                        break;
+                    case STATE_PROC_FRAME_P25_LDU1:
+                    case STATE_PROC_FRAME_P25_LDU1_1:
+                    case STATE_PROC_FRAME_P25_LDU1_2:
+                    case STATE_PROC_FRAME_P25_LDU1_3:
+                    case STATE_PROC_FRAME_P25_LDU1_4:
+                    case STATE_PROC_FRAME_P25_LDU1_5:
+                    case STATE_PROC_FRAME_P25_LDU1_6:
+                    case STATE_PROC_FRAME_P25_LDU1_7:
+                    case STATE_PROC_FRAME_P25_LDU1_8:
+                        pos += processP25LDU1((count-pos), &in[pos]);
+                        break;
+                    case STATE_PROC_FRAME_P25_LDU2:
+                    case STATE_PROC_FRAME_P25_LDU2_1:
+                    case STATE_PROC_FRAME_P25_LDU2_2:
+                    case STATE_PROC_FRAME_P25_LDU2_3:
+                    case STATE_PROC_FRAME_P25_LDU2_4:
+                    case STATE_PROC_FRAME_P25_LDU2_5:
+                    case STATE_PROC_FRAME_P25_LDU2_6:
+                    case STATE_PROC_FRAME_P25_LDU2_7:
+                    case STATE_PROC_FRAME_P25_LDU2_8:
+                        pos += processP25LDU2((count-pos), &in[pos]);
+                        break;
+                    case STATE_PROC_FRAME_P25_TDULC:
+                    case STATE_PROC_FRAME_P25_TDULC_1:
+                    case STATE_PROC_FRAME_P25_TDULC_2:
+                        pos += processP25TDULC((count-pos), &in[pos]);
+                        break;
+                    case STATE_PROC_FRAME_P25_TDU:
+                        pos += processP25TDU((count-pos), &in[pos]);
+                        break;
+                    case STATE_PROC_FRAME_P25_TSDU:
+                        pos += processP25TSDU((count-pos), &in[pos]);
+                        break;
+                    case STATE_PROC_FRAME_P25_PDU:
+                        pos += processP25PDU((count-pos), &in[pos]);
+                        break;
+                }
+            }
+            outSymsCtr += outcnt;
+            inSymsCtr += count;
+            int requiredOut = inSymsCtr * 5 / 3;
+            int remainingOut = requiredOut - outSymsCtr;
+            if(remainingOut > 0 && !mbe_status.mbe_status_decoding) {
+                memset(&(out[outcnt]), 0, remainingOut*sizeof(short));
+                outcnt += remainingOut;
+            }
+            outSymsCtr -= (std::min(outSymsCtr, requiredOut));
+            inSymsCtr -= requiredOut * 3 / 5;
+            return outcnt;
+        }
+
+        int NewDSD::findFrameSync(int count, const uint8_t* in) {
+            int usedDibits = 0;
+            for(int i = 0; i < count; i++) {
+                char dibit;
+                if (fss_dibitBufP > 900000) {
+                    fss_dibitBufP = 200;
+                }
+                if (in[i] == 0b01 || in[i] == 0b00) {
+                    dibitBuf[fss_dibitBufP++] = in[i];
+                    dibit = '1';
+                } else {
+                    dibitBuf[fss_dibitBufP++] = in[i];
+                    dibit = '3';
+                }
+
+                framesynctest_buf[framesynctest_p] = dibit;
+                usedDibits++;
+                if(curr_state == STATE_NOT_ENOUGH_DATA) {
+                    frame_status.sync = false;
+                    framesyncSymbolsRead++;
+                    if(framesyncSymbolsRead >= 18) {
+                        curr_state = STATE_NO_SYNC;
+                        frame_status.sync = false;
+                    }
+                    continue;
+                }
+                char framesynctest[25];
+                framesynctest[24] = 0;
+                strncpy (framesynctest, &(framesynctest_buf[framesynctest_p - 23]), 24);
+                if ((strcmp (framesynctest, DMR_MS_DATA_SYNC) == 0) || (strcmp (framesynctest, DMR_BS_DATA_SYNC) == 0)) {
+                    //DMR DATA FRAME SYNC FOUND!
+                    framesynctest_offset = framesynctest_p;
+                    curr_state = STATE_FSFND_DMR_DATA;
+                    frame_status.sync = true;
+                    frame_status.lasttype = Frame_status::LAST_DMR;
+                    break;
+                }
+                if ((strcmp (framesynctest, DMR_MS_VOICE_SYNC) == 0) || (strcmp (framesynctest, DMR_BS_VOICE_SYNC) == 0)) {
+                    //DMR VOICE FRAME SYNC FOUND!
+                    framesynctest_offset = framesynctest_p;
+                    curr_state = STATE_FSFND_DMR_VOICE;
+                    dmrv_iter = 0;
+                    dmrv_ctr = 0;
+                    frame_status.sync = true;
+                    frame_status.lasttype = Frame_status::LAST_DMR;
+                    break;
+                }
+                if (strcmp (framesynctest, P25P1_SYNC) == 0) {
+                    //P25p1+ FRAME SYNC FOUND!
+                    framesynctest_offset = framesynctest_p;
+                    curr_state = STATE_FSFND_P25;
+                    frame_status.sync = true;
+                    frame_status.lasttype = Frame_status::LAST_P25;
+                    break;
+                }
+                if (strcmp (framesynctest, INV_P25P1_SYNC) == 0) {
+                    //P25p1- FRAME SYNC FOUND!
+                    framesynctest_offset = framesynctest_p;
+                    curr_state = STATE_FSFND_P25;
+                    frame_status.sync = true;
+                    frame_status.lasttype = Frame_status::LAST_P25;
+                    break;
+                }
+                if (framesynctest_p < 1023) {
+                    framesynctest_p++;
+                } else {
+                    // buffer reset
+                    framesynctest_p = 25;
+                }
+
+                if (curr_state == STATE_SYNC) {
+                    if (framesynctest_p >= 1000){
+                        frame_status.sync = false;
+                        curr_state = STATE_NO_SYNC;
+                    }
+                }
+            }
+            return usedDibits;
+        }
+
+        void NewDSD::processMbeFrame(char imbe_fr[8][23], char ambe_fr[4][24], char imbe7100_fr[7][24], short* out, int* outcnt) {
+            int i, n;
+            char imbe_d[88];
+            char ambe_d[49];
+            float aout_abs, max, gainfactor, gaindelta, maxbuf;
+            int errs = 0;
+            int errs2 = 0;
+
+            for (i = 0; i < 88; i++) {
+                imbe_d[i] = 0;
+            }
+
+            //maybe will be used later
+//            } else if ((synctype == 14) || (synctype == 15)) {
+//                mbe_processImbe7100x4400Frame (base_type::out.writeBuf, &errs, &errs2, mbe_errStr, imbe7100_fr, imbe_d, &curMp, &prevMp, &prevMpEnhanced, MBE_uvquality);
+//            } else if ((synctype == 6) || (synctype == 7)) {
+//                mbe_processAmbe3600x2400Frame (base_type::out.writeBuf, &errs, &errs2, mbe_errStr, ambe_fr, ambe_d, &curMp, &prevMp, &prevMpEnhanced, MBE_uvquality);
+            if(curr_state >= STATE_PROC_FRAME_DMR_VOICE && curr_state <= STATE_PROC_FRAME_DMR_VOICE_10) {
+                //DMR
+                mbe_processAmbe3600x2450Frame (out, &errs, &errs2, mbe_errStr, ambe_fr, ambe_d, &curMp, &prevMp, &prevMpEnhanced, MBE_uvquality);
+            } else if(curr_state >= STATE_PROC_FRAME_P25 && curr_state <= STATE_PROC_FRAME_P25_PDU) {
+                //P25p1
+                mbe_processImbe7200x4400Frame (out, &errs, &errs2, mbe_errStr, imbe_fr, imbe_d, &curMp, &prevMp, &prevMpEnhanced, MBE_uvquality);
+            }
+
+            mbe_status.mbe_status_errorbar += std::string(mbe_errStr);
+
+            *outcnt += 160;
+        }
+
+
+
+
         // DMR filter
         #define DMR_FILT_ZEROS 60
         constexpr static const float dmrFiltGain = 7.423339364f;

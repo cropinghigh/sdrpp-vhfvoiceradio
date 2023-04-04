@@ -13,11 +13,13 @@
 #include <fftw3.h>
 #include "common.h"
 
+#define CTCSS_SENSITIVITY 20
+
 namespace dsp {
 
     //Input sample rate = 600 S/s
-    class CTCSSFreqMeasure : public Processor<float, float> {
-        using base_type = Processor<float, float>;
+    class CTCSSFreqMeasure : public Sink<float> {
+        using base_type =  Sink<float>;
     public:
         CTCSSFreqMeasure() {}
 
@@ -58,7 +60,7 @@ namespace dsp {
             squelchFrequency = squelchFreq;
         }
 
-        inline int process(int count, const float* in, float* out) {
+        inline int process(int count, const float* in) {
             float stddev,mean,nf;
             float fft_pwr_points[nr];
             uint32_t maxFreq = 1;
@@ -82,7 +84,7 @@ namespace dsp {
             maxFreq+=beginIndex;
             maxPwr = fft_pwr_points[maxFreq];
             float realFreq = (600.0f * (float)maxFreq) / (float)(nSamp);
-            if(maxFreq != 1 && (maxPwr - nf) >= 20 ) { //PWR - noise floor >= 20dB
+            if(maxFreq != 1 && (maxPwr - nf) >= CTCSS_SENSITIVITY ) { //PWR - noise floor >= CTCSS_SENSITIVITY dB
                     freq = realFreq;
                     if(fabs(freq - squelchFrequency) < 0.9f) {
                         frequencyMatch = true;
@@ -106,7 +108,7 @@ namespace dsp {
             int count = base_type::_in->read();
             if (count < 0) { return -1; }
 
-            process(count, base_type::_in->readBuf, base_type::out.writeBuf);
+            process(count, base_type::_in->readBuf);
             //no output
             base_type::_in->flush();
             return 0;
