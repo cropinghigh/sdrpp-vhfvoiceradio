@@ -13,7 +13,7 @@
 #include <fftw3.h>
 #include "common.h"
 
-#define CTCSS_SENSITIVITY 20
+#define CTCSS_SENSITIVITY 17
 
 namespace dsp {
 
@@ -139,7 +139,7 @@ namespace dsp {
         ~CTCSSSquelch() {
             if (!base_type::_block_init) { return; }
             base_type::stop();
-            taps::free(outFilterTaps);
+            // taps::free(outFilterTaps);
         }
 
         void init(stream<stereo_t>* in, float inputSr) {
@@ -149,9 +149,9 @@ namespace dsp {
             reshape.init(&dcblock.out, 120, 0); //0.2sec
             freqMeasure.init(&reshape.out, 120, squelchFreq);
 
-            taps::free(outFilterTaps);
-            outFilterTaps = taps::highPass(300.0, 100.0, inputSr);
-            outFilter.init(NULL, outFilterTaps);
+            // taps::free(outFilterTaps);
+            // outFilterTaps = taps::highPass(300.0, 100.0, inputSr);
+            // outFilter.init(NULL, outFilterTaps);
 
             //DIRTY HACK!!! I just don't know how to make it in better way
 
@@ -181,9 +181,9 @@ namespace dsp {
             std::lock_guard<std::recursive_mutex> lck(base_type::ctrlMtx);
             base_type::tempStop();
             resamp.setInSamplerate(inputSr);
-            taps::free(outFilterTaps);
-            outFilterTaps = taps::highPass(300.0, 100.0, inputSr);
-            outFilter.setTaps(outFilterTaps);
+            // taps::free(outFilterTaps);
+            // outFilterTaps = taps::highPass(300.0, 100.0, inputSr);
+            // outFilter.setTaps(outFilterTaps);
             base_type::tempStart();
         }
 
@@ -215,7 +215,8 @@ namespace dsp {
             if (!squelchEnabled) {
                 memcpy(out, in, count * sizeof(stereo_t));
             } else if(freqMeasure.frequencyMatch) {
-                outFilter.process(count, in, out);
+                // outFilter.process(count, in, out);
+                memcpy(out, in, count * sizeof(stereo_t));
             } else {
                 memset(out, 0, count * sizeof(stereo_t));
             }
@@ -245,8 +246,8 @@ namespace dsp {
         CTCSSFreqMeasure freqMeasure;
 
         //Squelch chain
-        tap<float> outFilterTaps;
-        filter::FIR<stereo_t, float> outFilter;
+        // tap<float> outFilterTaps;
+        // filter::FIR<stereo_t, float> outFilter;
 
         bool squelchEnabled = false;
         float squelchFreq = 88.5;

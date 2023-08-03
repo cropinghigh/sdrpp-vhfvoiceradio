@@ -38,6 +38,203 @@ std::map<IFNRPreset, double> ifnrTaps = {
     { IFNR_PRESET_BROADCAST, 32 }
 };
 
+namespace dsp {
+    template<class T>
+    class Customchain {
+    public:
+        Customchain() {}
+
+        Customchain(stream<T>* in) { init(in); }
+
+        void init(stream<T>* in) {
+            _in = in;
+            out = _in;
+        }
+
+        template<typename Func>
+        void setInput(stream<T>* in, Func onOutputChange) {
+            _in = in;
+            for (auto& ln : links) {
+                if (states[ln]) {
+                    ln->setInput(_in);
+                    return;
+                }
+            }
+            out = _in;
+            onOutputChange(out);
+        }
+        
+        void addBlock(Processor<T, T>* block, bool enabled) {
+            // Check if block is already part of the chain
+            if (blockExists(block)) {
+                throw std::runtime_error("[chain] Tried to add a block that is already part of the chain");
+            }
+
+            // Add to the list
+            links.push_back(block);
+            states[block] = false;
+
+            // Enable if needed
+            if (enabled) { enableBlock(block, [](stream<T>* out){}); }
+        }
+
+        template<typename Func>
+        void removeBlock(Processor<T, T>* block, Func onOutputChange) {
+            // Check if block is part of the chain
+            if (!blockExists(block)) {
+                throw std::runtime_error("[chain] Tried to remove a block that is not part of the chain");
+            }
+
+            // Disable the block
+            disableBlock(block, onOutputChange);
+        
+            // Remove block from the list
+            states.erase(block);
+            links.erase(std::find(links.begin(), links.end(), block));
+            
+        }
+
+        template<typename Func>
+        void enableBlock(Processor<T, T>* block, Func onOutputChange) {
+            // Check that the block is part of the chain
+            if (!blockExists(block)) {
+                throw std::runtime_error("[chain] Tried to enable a block that isn't part of the chain");
+            }
+            
+            // If already enable, don't do anything
+            if (states[block]) { return; }
+
+            // Gather blocks before and after the block to enable
+            Processor<T, T>* before = blockBefore(block);
+            Processor<T, T>* after = blockAfter(block);
+
+
+            // Update input of next block or output
+            if (after) {
+                after->setInput(&block->out);
+            }
+            else {
+                out = &block->out;
+                onOutputChange(out);
+            }
+
+            // Set input of the new block
+            block->setInput(before ? &before->out : _in);
+
+            
+            // Start new block
+            if (running) { block->start(); }
+            states[block] = true;
+        }
+
+        template<typename Func>
+        void disableBlock(Processor<T, T>* block, Func onOutputChange) {
+            // Check that the block is part of the chain
+            if (!blockExists(block)) {
+                throw std::runtime_error("[chain] Tried to enable a block that isn't part of the chain");
+            }
+            
+            // If already disabled, don't do anything
+            if (!states[block]) { return; }
+
+            // Stop disabled block
+            block->stop();
+            states[block] = false;
+
+            // Gather blocks before and after the block to disable
+            Processor<T, T>* before = blockBefore(block);
+            Processor<T, T>* after = blockAfter(block);
+            
+            // Update input of next block or output
+            if (after) {
+                after->setInput(before ? &before->out : _in);
+            }
+            else {
+                out = before ? &before->out : _in;
+                onOutputChange(out);
+            }
+        }
+
+        template<typename Func>
+        void setBlockEnabled(Processor<T, T>* block, bool enabled, Func onOutputChange) {
+            if (enabled) {
+                enableBlock(block, onOutputChange);
+            }
+            else {
+                disableBlock(block, onOutputChange);
+            }
+        }
+
+        template<typename Func>
+        void enableAllBlocks(Func onOutputChange) {
+            for (auto& ln : links) {
+                enableBlock(ln, onOutputChange);
+            }
+        }
+
+        template<typename Func>
+        void disableAllBlocks(Func onOutputChange) {
+            for (auto& ln : links) {
+                disableBlock(ln, onOutputChange);
+            }
+        }
+
+        void start() {
+            if (running) { return; }
+            for (auto& ln : links) {
+                if (!states[ln]) { continue; }
+                ln->start();
+            }
+            running = true;
+        }
+
+        void stop() {
+            if (!running) { return; }
+            for (auto& ln : links) {
+                if (!states[ln]) { continue; }
+                ln->stop();
+            }
+            running = false;
+        }
+
+        stream<T>* out;
+
+    private:
+        Processor<T, T>* blockBefore(Processor<T, T>* block) {
+            Processor<T, T>* last = NULL;
+            for (auto& ln : links) {
+                // if (ln == block) { return NULL; }
+                // if (states[ln]) { return ln; }
+                if (ln == block) {
+                    return last;
+                }
+                if (states[ln]) { last = ln; }
+            }
+        }
+
+        Processor<T, T>* blockAfter(Processor<T, T>* block) {
+            bool blockFound = false;
+            for (auto& ln : links) {
+                if (ln == block) {
+                    blockFound = true;
+                    continue;
+                }
+                if (states[ln] && blockFound) { return ln; }
+            }
+            return NULL;
+        }
+
+        bool blockExists(Processor<T, T>* block) {
+            return states.find(block) != states.end();
+        }
+
+        stream<T>* _in;
+        std::vector<Processor<T, T>*> links;
+        std::map<Processor<T, T>*, bool> states;
+        bool running = false;
+    };
+}
+
 class VhfVoiceRadioModule : public ModuleManager::Instance {
 public:
     VhfVoiceRadioModule(std::string name) {
@@ -91,9 +288,14 @@ public:
         ctcssSquelch.init(NULL, 48000);
         dcsSquelch.init(NULL, 48000);
 
+        dsp::taps::free(hpfTaps);
+        hpfTaps = dsp::taps::highPass(300.0, 100.0, 48000);
+        hpf.init(NULL, hpfTaps);
+
         afChain.addBlock(&resamp, true);
         afChain.addBlock(&ctcssSquelch, false);
         afChain.addBlock(&dcsSquelch, false);
+        afChain.addBlock(&hpf, false);
         afChain.addBlock(&deemp, false);
 
         // Initialize the sink
@@ -316,6 +518,9 @@ private:
                 _this->setDcsCode(_this->dcsCode);
             }
             if (!_this->dcsEnabled && _this->enabled) { style::endDisabled(); }
+            if (ImGui::Checkbox(("High pass##_vhfvoradio_highpass_" + _this->name).c_str(), &_this->highPass)) {
+                _this->setHighpass(_this->highPass);
+            }
         }
 
         // Demodulator specific menu
@@ -345,6 +550,7 @@ private:
                 config.conf[name][demod->getName()]["ctcssEnabled"] = false;
                 config.conf[name][demod->getName()]["dcsCode"] = ctcssFreq;
                 config.conf[name][demod->getName()]["dcsEnabled"] = false;
+                config.conf[name][demod->getName()]["highPass"] = false;
             }
             bw = std::clamp<double>(bw, demod->getMinBandwidth(), demod->getMaxBandwidth());
 
@@ -433,6 +639,9 @@ private:
         if(config.conf[name][selectedDemod->getName()].contains("dcsEnabled")) {
             dcsEnabled = config.conf[name][selectedDemod->getName()]["dcsEnabled"];
         }
+        if (config.conf[name][selectedDemod->getName()].contains("highPass")) {
+            highPass = config.conf[name][selectedDemod->getName()]["highPass"];
+        }
         if (config.conf[name][selectedDemod->getName()].contains("deempMode")) {
             if (!config.conf[name][selectedDemod->getName()]["deempMode"].is_string()) {
                 config.conf[name][selectedDemod->getName()]["deempMode"] = deempModes.key(deempId);
@@ -503,14 +712,14 @@ private:
             setAudioSampleRate(audioSampleRate);
             ctcssSquelch.setInputSr(audioSampleRate);
             dcsSquelch.setInputSr(audioSampleRate);
+            dsp::taps::free(hpfTaps);
+            hpfTaps = dsp::taps::highPass(300.0, 100.0, audioSampleRate);
+            hpf.setTaps(hpfTaps);
             afChain.enableBlock(&resamp, [=](dsp::stream<dsp::stereo_t>* out){ printf("rsfin\n"); stream.setInput(out); });
-            if(deempAllowed) {
-                afChain.setBlockEnabled(&dcsSquelch, true, [=](dsp::stream<dsp::stereo_t>* out){ stream.setInput(out); });
-                afChain.setBlockEnabled(&ctcssSquelch, true, [=](dsp::stream<dsp::stereo_t>* out){ stream.setInput(out); });
-            } else {
-                afChain.setBlockEnabled(&dcsSquelch, false, [=](dsp::stream<dsp::stereo_t>* out){ stream.setInput(out); });
-                afChain.setBlockEnabled(&ctcssSquelch, false, [=](dsp::stream<dsp::stereo_t>* out){ stream.setInput(out); });
-            }
+            afChain.setBlockEnabled(&ctcssSquelch, deempAllowed, [=](dsp::stream<dsp::stereo_t>* out){ stream.setInput(out); });
+            afChain.setBlockEnabled(&dcsSquelch, deempAllowed, [=](dsp::stream<dsp::stereo_t>* out){ stream.setInput(out); });
+
+             afChain.setBlockEnabled(&hpf, highPass, [=](dsp::stream<dsp::stereo_t>* out){ stream.setInput(out); });
 
             // Configure deemphasis
             setDeemphasisMode(deempModes[deempId]);
@@ -557,6 +766,9 @@ private:
         resamp.setOutSamplerate(audioSampleRate);
         ctcssSquelch.setInputSr(audioSampleRate);
         dcsSquelch.setInputSr(audioSampleRate);
+        dsp::taps::free(hpfTaps);
+        hpfTaps = dsp::taps::highPass(300.0, 100.0, audioSampleRate);
+        hpf.setTaps(hpfTaps);
 
         // Configure deemphasis sample rate
         deemp.setSamplerate(audioSampleRate);
@@ -635,6 +847,16 @@ private:
         // Save config
         config.acquire();
         config.conf[name][selectedDemod->getName()]["dcsCode"] = dcsCode;
+        config.release(true);
+    }
+
+    void setHighpass(bool highpass) {
+        highPass = highpass;
+        afChain.setBlockEnabled(&hpf, highPass, [=](dsp::stream<dsp::stereo_t>* out){ stream.setInput(out); });
+
+        // Save config
+        config.acquire();
+        config.conf[name][selectedDemod->getName()]["highPass"] = highpass;
         config.release(true);
     }
 
@@ -823,10 +1045,12 @@ private:
 
     // Audio chain
     dsp::stream<dsp::stereo_t> dummyAudioStream;
-    dsp::chain<dsp::stereo_t> afChain;
+    dsp::Customchain<dsp::stereo_t> afChain; //Required since core chain is broken
     dsp::multirate::RationalResampler<dsp::stereo_t> resamp;
     dsp::CTCSSSquelch ctcssSquelch;
     dsp::DCSSquelch dcsSquelch;
+    dsp::tap<float> hpfTaps;
+    dsp::filter::FIR<dsp::stereo_t, float> hpf;
     dsp::filter::Deemphasis<dsp::stereo_t> deemp;
 
 
@@ -854,6 +1078,8 @@ private:
 
     bool dcsEnabled = false;
     int dcsCode = +25;
+
+    bool highPass = false;
 
     int deempId = 0;
     bool deempAllowed;
