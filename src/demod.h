@@ -52,3 +52,8 @@ namespace demod {
 #include "demodulators/dsd.h"
 #include "demodulators/nfm.h"
 #include "demodulators/olddsd.h"
+#include "demodulators/wfm.h"
+#include "demodulators/am.h"
+#include "demodulators/usb.h"
+#include "demodulators/lsb.h"
+#include "demodulators/raw.h"
