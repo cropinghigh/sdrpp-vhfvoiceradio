@@ -81,6 +81,7 @@ namespace dsp {
             uint8_t dmr_status_s1_lastburstt = 0;
             std::string dmr_status_s0_lasttype = "";
             std::string dmr_status_s1_lasttype = "";
+            uint8_t dmr_status_cc = 0;
         };
         struct P25_status {
             int p25_status_src = 0;

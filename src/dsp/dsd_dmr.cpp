@@ -5,9 +5,8 @@ namespace dsp {
     int NewDSD::processDMRdata(int count, const uint8_t* in) {
         int usedDibits = 0;
         if(curr_state == STATE_PROC_FRAME_DMR_DATA) {
-            char cc[5];
+            uint8_t cc = 0;
             char bursttype[5];
-            cc[4] = 0;
             bursttype[4] = 0;
             char syncdata[25];
             char sync[25];
@@ -23,12 +22,14 @@ namespace dsp {
             }
             dmr_dibitBuffP += 49;
             int dibit = dibitBuf[dmr_dibitBuffP++];
-            cc[0] = (1 & (dibit >> 1)) + 48;      // bit 1
-            cc[1] = (1 & dibit) + 48;     // bit 0
+            cc |= ((1 & (dibit >> 1))) << 0; //bit1
+            cc |= (1 & dibit) << 1;     // bit 0
 
             dibit = dibitBuf[dmr_dibitBuffP++];
-            cc[2] = (1 & (dibit >> 1)) + 48;      // bit 1
-            cc[3] = (1 & dibit) + 48;     // bit 0
+            cc |= (1 & (dibit >> 1)) << 2;      // bit 1
+            cc |= (1 & dibit) << 3;     // bit 0
+
+            dmr_status.dmr_status_cc = cc;
 
             dibit = dibitBuf[dmr_dibitBuffP++];
             bursttype[0] = (1 & (dibit >> 1)) + 48;       // bit 1

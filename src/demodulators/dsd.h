@@ -154,6 +154,7 @@ namespace demod {
                     dsp::NewDSD::DMR_status dmr_st = decoder.getDMRStatus();
                     ImGui::Text("SLOT0: (%02d) %s", dmr_st.dmr_status_s0_lastburstt, dmr_st.dmr_status_s0_lasttype.c_str());
                     ImGui::Text("SLOT1: (%02d) %s", dmr_st.dmr_status_s1_lastburstt, dmr_st.dmr_status_s1_lasttype.c_str());
+                    ImGui::Text("CC: 0x%02x", dmr_st.dmr_status_s1_lastburstt, dmr_st.dmr_status_cc);
                     if(!fr_st.sync) {
                         style::endDisabled();
                     }
