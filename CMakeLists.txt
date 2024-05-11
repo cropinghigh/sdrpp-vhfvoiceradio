@@ -4,9 +4,8 @@ project(vhfvoiceradio)
 set(CMAKE_INSTALL_PREFIX "/usr/")
 SET(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${PROJECT_SOURCE_DIR}/cmake/")
 
-file(GLOB_RECURSE SRC "src/*.cpp" "src/*.h" "src/*.hpp" "src/*.c")
+file(GLOB_RECURSE SRC "src/*.cpp" "src/*.h" "src/*.hpp" "src/*.c" "mbelib/*.c")
 
-find_package(MBE REQUIRED)
 find_package(ITPP REQUIRED)
 
 if (NOT SDRPP_MODULE_CMAKE)
@@ -15,5 +14,5 @@ endif ()
 
 include(${SDRPP_MODULE_CMAKE})
 
-target_link_libraries(vhfvoiceradio PRIVATE fftw3 ${ITPP_LIBRARY} ${MBE_LIBRARY})
-target_include_directories(vhfvoiceradio PRIVATE "src/" ${MBE_INCLUDE_DIR} ${ITPP_INCLUDE_DIR})
+target_link_libraries(vhfvoiceradio PRIVATE fftw3 ${ITPP_LIBRARY})
+target_include_directories(vhfvoiceradio PRIVATE "src/" "mbelib/")
